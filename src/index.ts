@@ -6,6 +6,7 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { stat } from "node:fs/promises"
 import { relative, resolve, sep } from "node:path"
 import ignore, { Ignore } from "ignore"
+import { loadAndValidate, UnsupportedSyntaxError } from "./program.js"
 
 const ENTRY_BASENAMES = ["initPlayerLocal", "initPlayerServer"]
 const ENTRY_EXTENSIONS = [".js", ".ts"]
@@ -79,8 +80,19 @@ async function transpile(projectDir: string) {
 		)
 		return
 	}
-
-	for (const entryFile of entryFiles) {
-		console.log(`Found entry file: ${relative(projectDir, entryFile)}`)
+	
+	try {
+		const sourceFiles = loadAndValidate(entryFiles, projectDir)
+		console.log(`Module graph (${sourceFiles.length} file(s)):`)
+		for (const sourceFile of sourceFiles) {
+			console.log(`  ${relative(projectDir, sourceFile.fileName)}`)
+		}
+	} catch (err) {
+		if (err instanceof UnsupportedSyntaxError) {
+			// Expected, user-facing — print the message, not a stack trace.
+			console.error(`Cannot transpile: ${err.message}`)
+			return
+		}
+		throw err
 	}
 }
