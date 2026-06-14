@@ -3,8 +3,12 @@
 import { watch } from "chokidar"
 import { Command } from "commander"
 import { existsSync, readFileSync, statSync } from "node:fs"
+import { stat } from "node:fs/promises"
 import { relative, resolve, sep } from "node:path"
 import ignore, { Ignore } from "ignore"
+
+const ENTRY_BASENAMES = ["initPlayerLocal", "initPlayerServer"]
+const ENTRY_EXTENSIONS = [".js", ".ts"]
 
 const command = new Command()
 
@@ -46,6 +50,37 @@ command
 
 await command.parseAsync()
 
+async function findEntryFiles(projectDir: string): Promise<string[]> {
+	const candidates = ENTRY_BASENAMES.flatMap((base) =>
+		ENTRY_EXTENSIONS.map((ext) => resolve(projectDir, `${base}${ext}`)),
+	)
+	return (await Promise.all(
+		candidates.map(async (candidate) => {
+			try {
+				console.log(candidate, (await stat(candidate)).isFile())
+				return (await stat(candidate)).isFile() ? candidate : undefined
+			} catch {
+				return undefined
+			}
+		})
+	)).filter(x => x !== undefined)
+}
+
 async function transpile(projectDir: string) {
 	console.log(`Transpiling ${projectDir}...`)
+
+	const entryFiles = await findEntryFiles(projectDir)
+	if (entryFiles.length === 0) {
+		console.error(
+			`Error: no entry file found in ${projectDir}. Expected one of: ` +
+				ENTRY_BASENAMES.flatMap((base) =>
+					ENTRY_EXTENSIONS.map((ext) => `${base}${ext}`),
+				).join(", "),
+		)
+		return
+	}
+
+	for (const entryFile of entryFiles) {
+		console.log(`Found entry file: ${relative(projectDir, entryFile)}`)
+	}
 }
