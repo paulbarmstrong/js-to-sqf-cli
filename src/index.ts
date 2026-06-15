@@ -21,7 +21,8 @@ command
 		}
 		console.log(`Watching ${projectDir}...`)
 
-		const ignoreInstance: Ignore = ignore().add(".git")
+		// `.sqf` files are our own output; watching them would loop (write -> event -> write).
+		const ignoreInstance: Ignore = ignore().add(".git").add("*.sqf")
 		const gitignorePath = resolve(projectDir, ".gitignore")
 		if (existsSync(gitignorePath)) {
 			ignoreInstance.add(readFileSync(gitignorePath, "utf8"))
@@ -33,11 +34,11 @@ command
 			return ignoreInstance.ignores(rel.split(sep).join("/"))
 		}
 
-		watch(projectDir, {ignoreInitial: true, ignored: (path) => isIgnored(path)}).on('all', async (event, path) => {
+		watch(projectDir, {ignoreInitial: true, ignored: (path) => isIgnored(path)}).on('all', async () => {
 			try {
 				await transpile(projectDir)
 			} catch (err) {
-				console.error(`Failed to transpile ${path}:`, err)
+				console.error("Failed to transpile:", err)
 			}
 		})
 

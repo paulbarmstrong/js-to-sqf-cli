@@ -2,6 +2,9 @@ import ts from "typescript"
 
 export const TYPES_PACKAGE_NAME = "js-to-sqf"
 
+/** Entry files are resolved relative to this directory within the project. */
+export const SRC_DIR = "src"
+
 export const ENTRY_FILE_NAMES = [
 	"initPlayerLocal.js",
 	"initPlayerLocal.ts",
