@@ -12,37 +12,38 @@ const command = new Command()
 command
 	.name("js-to-sqf")
 	.description("Watch a directory and transpile JS to SQF")
-	.argument("[dir]", "directory to watch", ".")
-	.action(async (dir: string) => {
+	.argument("[dir]", "project directory", ".")
+	.option("--watch", "watch project for changes and keep transpiling")
+	.action(async (dir: string, options) => {
 		const projectDir: string  = resolve(process.cwd(), dir)
 		if (!existsSync(projectDir) || !statSync(projectDir).isDirectory()) {
 			console.error(`Error: not a directory: ${projectDir}`)
 			process.exit(1)
 		}
-		console.log(`Watching ${projectDir}...`)
 
-		// `.sqf` files are our own output; watching them would loop (write -> event -> write).
-		const ignoreInstance: Ignore = ignore().add(".git").add("*.sqf")
-		const gitignorePath = resolve(projectDir, ".gitignore")
-		if (existsSync(gitignorePath)) {
-			ignoreInstance.add(readFileSync(gitignorePath, "utf8"))
-		}
-		const isIgnored = (path: string) => {
-			const rel = relative(projectDir, path)
-			// The watch root itself has an empty relative path; never ignore it.
-			if (rel === "" || rel.startsWith("..")) return false
-			return ignoreInstance.ignores(rel.split(sep).join("/"))
-		}
+		if (options.watch) {
+			console.log(`Watching ${projectDir}...`)
 
-		watch(projectDir, {ignoreInitial: true, ignored: (path) => isIgnored(path)}).on('all', async () => {
-			try {
-				await transpile(projectDir)
-			} catch (err) {
-				console.error("Failed to transpile:", err)
+			const ignoreInstance: Ignore = ignore().add(".git").add("*.sqf")
+			const gitignorePath = resolve(projectDir, ".gitignore")
+			if (existsSync(gitignorePath)) {
+				ignoreInstance.add(readFileSync(gitignorePath, "utf8"))
 			}
-		})
+			const isIgnored = (path: string) => {
+				const rel = relative(projectDir, path)
+				if (rel === "" || rel.startsWith("..")) return false
+				return ignoreInstance.ignores(rel.split(sep).join("/"))
+			}
 
-		// Initial transpile
+			watch(projectDir, {ignoreInitial: true, ignored: (path) => isIgnored(path)}).on('all', async () => {
+				try {
+					await transpile(projectDir)
+				} catch (err) {
+					console.error("Failed to transpile:", err)
+				}
+			})
+		}
+
 		await transpile(projectDir)
 	})
 
