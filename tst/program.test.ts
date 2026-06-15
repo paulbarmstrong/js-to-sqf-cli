@@ -4,43 +4,74 @@ import { describe, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import ts from "typescript"
 
-import { checkSupported, loadAndValidate, UnsupportedSyntaxError } from "../src/program.js"
+import { Emitter, UnsupportedSyntaxError } from "../src/classes/Emitter"
 
-/** Committed fixture trees live next to this test file — read, never written. */
-const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures")
-
-/** Parse `code` in-memory and run the per-file validator on it. */
-function validate(code: string, fileName = "test.js"): void {
+/** Parse `code` in-memory and emit SQF — the unified traversal validates as it emits. */
+function emit(code: string, fileName = "test.js"): string {
 	const sourceFile = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true)
-	checkSupported(sourceFile, "")
+	return new Emitter(sourceFile).emitFile()
 }
 
-describe("checkSupported (per-file validation)", () => {
-	test("accepts supported syntax", () => {
-		assert.doesNotThrow(() =>
-			validate(`
-				const greeting = "hello"
-				function add(a, b) {
-					return a + b
-				}
-				if (add(1, 2) > 0) {
-					hint(greeting)
-				}
-			`),
+describe("emitSourceFile (validate + emit in one pass)", () => {
+	test("emits an intrinsic call as a unary SQF command", () => {
+		const sqf = emit(`import { systemChat } from "js-to-sqf"\nsystemChat("hello world")`)
+		assert.equal(sqf.trim(), `systemChat "hello world";`)
+	})
+
+	test("resolves an aliased intrinsic to its SQF command", () => {
+		const sqf = emit(`import { systemChat as log } from "js-to-sqf"\nlog("hi")`)
+		assert.equal(sqf.trim(), `systemChat "hi";`)
+	})
+
+	test("emits a bis.* namespace call in BIS function (call) form", () => {
+		const sqf = emit(
+			`import { bis } from "js-to-sqf"\nbis.crewCount("B_Heli_Light_01_F", false)`,
+		)
+		assert.equal(sqf.trim(), `["B_Heli_Light_01_F", false] call BIS_fnc_crewCount;`)
+	})
+
+	test("emits a single-arg bis.* call without an args array", () => {
+		const sqf = emit(`import { bis } from "js-to-sqf"\nbis.crewCount("x")`)
+		assert.equal(sqf.trim(), `"x" call BIS_fnc_crewCount;`)
+	})
+
+	test("emits a diag.* namespace call in command form", () => {
+		const sqf = emit(`import { diag } from "js-to-sqf"\ndiag.log("x")`)
+		assert.equal(sqf.trim(), `diag_log "x";`)
+	})
+
+	test("resolves an aliased namespace import", () => {
+		const sqf = emit(`import { bis as b } from "js-to-sqf"\nb.crewCount("x")`)
+		assert.equal(sqf.trim(), `"x" call BIS_fnc_crewCount;`)
+	})
+
+	test("rejects a member call on something that is not an imported namespace", () => {
+		assert.throws(
+			() => emit(`foo.bar("x")`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /not an imported intrinsic namespace/.test(err.message),
 		)
 	})
 
-	test("accepts a relative import", () => {
-		assert.doesNotThrow(() => validate(`import { add } from "./math.js"`))
+	test("emits if/then with a binary condition", () => {
+		const sqf = emit(
+			`import { systemChat } from "js-to-sqf"\nif (1 > 0) {\n\tsystemChat("x")\n}`,
+		)
+		assert.match(sqf, /if \(1 > 0\) then \{/)
+		assert.match(sqf, /systemChat "x";/)
 	})
 
-	test("accepts require() of a relative path", () => {
-		assert.doesNotThrow(() => validate(`const math = require("./math.js")`))
+	test("rejects a default import from an intrinsic module", () => {
+		assert.throws(
+			() => emit(`import sqf from "js-to-sqf"`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /default import/.test(err.message),
+		)
 	})
 
 	test("rejects a bare (npm) import", () => {
 		assert.throws(
-			() => validate(`import _ from "lodash"`),
+			() => emit(`import _ from "lodash"`),
 			(err: unknown) =>
 				err instanceof UnsupportedSyntaxError && /lodash/.test(err.message),
 		)
@@ -48,54 +79,41 @@ describe("checkSupported (per-file validation)", () => {
 
 	test("rejects a node: builtin import", () => {
 		assert.throws(
-			() => validate(`import { readFile } from "node:fs"`),
+			() => emit(`import { readFile } from "node:fs"`),
 			(err: unknown) =>
 				err instanceof UnsupportedSyntaxError && /node:fs/.test(err.message),
 		)
 	})
 
-	test("rejects require() of a bare module", () => {
+	test("rejects a call to a non-intrinsic function", () => {
 		assert.throws(
-			() => validate(`const fs = require("fs")`),
+			() => emit(`hint("x")`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /no SQF mapping/.test(err.message),
+		)
+	})
+
+	test("rejects an unsupported statement (class)", () => {
+		assert.throws(
+			() => emit(`class Foo {}`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError &&
+				/unsupported statement: ClassDeclaration/.test(err.message),
+		)
+	})
+
+	test("rejects an unsupported expression (regex literal)", () => {
+		assert.throws(
+			() => emit(`import { systemChat } from "js-to-sqf"\nsystemChat(/x/)`),
 			UnsupportedSyntaxError,
 		)
-	})
-
-	test("rejects an unsupported node kind (class)", () => {
-		assert.throws(
-			() => validate(`class Foo {}`),
-			(err: unknown) =>
-				err instanceof UnsupportedSyntaxError && /ClassDeclaration/.test(err.message),
-		)
-	})
-
-	test("rejects a regex literal (no SQF equivalent)", () => {
-		assert.throws(() => validate(`const re = /[a-z]+/`), UnsupportedSyntaxError)
 	})
 
 	test("error message includes a file:line:column location", () => {
 		assert.throws(
-			() => validate(`\nclass Foo {}`, "thing.js"),
+			() => emit(`\nclass Foo {}`, "thing.js"),
 			(err: unknown) =>
-				err instanceof UnsupportedSyntaxError &&
-				/thing\.js:2:1:/.test(err.message),
-		)
-	})
-})
-
-describe("loadAndValidate (graph loading)", () => {
-	test("follows relative imports into the graph", () => {
-		const dir = join(FIXTURES, "valid-graph")
-		const files = loadAndValidate([join(dir, "initPlayerLocal.js")], dir)
-		const names = files.map((f) => f.fileName.split("/").pop()).sort()
-		assert.deepEqual(names, ["initPlayerLocal.js", "math.js"])
-	})
-
-	test("rejects a graph that imports an npm package", () => {
-		const dir = join(FIXTURES, "npm-import")
-		assert.throws(
-			() => loadAndValidate([join(dir, "initPlayerLocal.js")], dir),
-			UnsupportedSyntaxError,
+				err instanceof UnsupportedSyntaxError && /thing\.js:2:1:/.test(err.message),
 		)
 	})
 })
