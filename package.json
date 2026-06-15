@@ -8,7 +8,7 @@
 	"scripts": {
 		"start": "tsx src/index.ts",
 		"build": "tsc",
-		"test": "tsx --test tst/*.test.ts"
+		"test": "tsx --test tst/**/*.test.ts"
 	},
 	"repository": {
 		"type": "git",

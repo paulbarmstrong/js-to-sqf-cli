@@ -4,7 +4,7 @@ import { describe, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import ts from "typescript"
 
-import { Emitter, UnsupportedSyntaxError } from "../src/classes/Emitter"
+import { Emitter, UnsupportedSyntaxError } from "../../src/classes/Emitter"
 
 /** Parse `code` in-memory and emit SQF — the unified traversal validates as it emits. */
 function emit(code: string, fileName = "test.js"): string {
