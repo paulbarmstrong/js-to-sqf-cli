@@ -54,6 +54,12 @@ export const NAMESPACE_MAPPINGS: Map<string, NamespaceMapping> = new Map([
 	["diag", { sqfPrefix: "diag_", form: "command" }],
 ])
 
+/** Zero-arg value methods (e.g. `x.toString()`) that map to a unary SQF command
+ * applied to the receiver: `x.toString()` -> `str x`. */
+export const METHOD_MAPPINGS: Map<string, string> = new Map([
+	["toString", "str"],
+])
+
 export const CONSUMER_TS_COMPILER_OPTIONS = {
 	allowJs: true,
 	checkJs: false,

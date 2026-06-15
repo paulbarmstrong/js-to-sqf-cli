@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { BINARY_OPERATOR_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { BINARY_OPERATOR_MAPPINGS, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 
 export class UnsupportedSyntaxError extends Error {
 	override name = "UnsupportedSyntaxError"
@@ -19,9 +19,22 @@ export class Emitter {
 	/** local name (possibly aliased) -> namespace convention, for imports like `bis`/`diag` */
 	private importedNamespaces = new Map<string, NamespaceMapping>()
 
+	/** names of user-defined functions, called via SQF `call` (e.g. `call getCrewCount`) */
+	private userFunctions = new Set<string>()
+
+	/** in-scope local variable/parameter names; references are `_`-prefixed in SQF */
+	private locals = new Set<string>()
+
 	constructor(private readonly sourceFile: ts.SourceFile) {}
 
 	emitFile(): string {
+		// Function declarations are hoisted in JS, so register their names up front:
+		// a call may textually precede the declaration.
+		for (const statement of this.sourceFile.statements) {
+			if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+				this.userFunctions.add(statement.name.text)
+			}
+		}
 		// Statements are emitted in order; imports come first in ES modules, so
 		// the intrinsics map is populated before any call that uses it.
 		const lines = this.sourceFile.statements
@@ -45,6 +58,15 @@ export class Emitter {
 			case ts.SyntaxKind.Block:
 				return this.emitBlock(node as ts.Block)
 
+			case ts.SyntaxKind.FunctionDeclaration:
+				return this.emitFunctionDeclaration(node as ts.FunctionDeclaration)
+
+			case ts.SyntaxKind.VariableStatement:
+				return this.emitVariableStatement(node as ts.VariableStatement)
+
+			case ts.SyntaxKind.ReturnStatement:
+				return this.emitReturn(node as ts.ReturnStatement)
+
 			default:
 				throw new UnsupportedSyntaxError(node, this.sourceFile, `unsupported statement: ${ts.SyntaxKind[node.kind]}`)
 		}
@@ -55,6 +77,66 @@ export class Emitter {
 			.map((statement) => this.emitStatement(statement))
 			.filter((line) => line.length > 0)
 			.join("\n")
+	}
+
+	/** A user function becomes a global SQF code block: `name = { params [...]; body };`.
+	 * Params and locals are `_`-prefixed; calls to it use `call` (see `emitCall`). */
+	private emitFunctionDeclaration(node: ts.FunctionDeclaration): string {
+		if (node.name === undefined) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile, "anonymous functions are not supported")
+		}
+		if (node.body === undefined) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile,
+				`function "${node.name.text}" has no body`)
+		}
+		const paramNames = node.parameters.map((param) => {
+			if (!ts.isIdentifier(param.name)) {
+				throw new UnsupportedSyntaxError(param, this.sourceFile,
+					"destructured parameters are not supported")
+			}
+			return param.name.text
+		})
+
+		// Params and any locals declared inside the body are scoped to this function.
+		const outerLocals = this.locals
+		this.locals = new Set(outerLocals)
+		paramNames.forEach((name) => this.locals.add(name))
+		const parts: string[] = []
+		if (paramNames.length > 0) {
+			parts.push(`params [${paramNames.map((name) => `"_${name}"`).join(", ")}];`)
+		}
+		const body = this.emitBlock(node.body)
+		if (body.length > 0) parts.push(body)
+		this.locals = outerLocals
+
+		return `${node.name.text} = {\n${this.indent(parts.join("\n"))}\n};`
+	}
+
+	private emitVariableStatement(node: ts.VariableStatement): string {
+		return node.declarationList.declarations
+			.map((declaration) => this.emitVariableDeclaration(declaration))
+			.join("\n")
+	}
+
+	private emitVariableDeclaration(node: ts.VariableDeclaration): string {
+		if (!ts.isIdentifier(node.name)) {
+			throw new UnsupportedSyntaxError(node.name, this.sourceFile,
+				"destructuring declarations are not supported")
+		}
+		const name = node.name.text
+		// Resolve the initializer before binding the name, then register it so later
+		// references emit as `_name`.
+		const out = node.initializer === undefined
+			? `private _${name};`
+			: `private _${name} = ${this.emitExpression(node.initializer)};`
+		this.locals.add(name)
+		return out
+	}
+
+	/** SQF code blocks have no `return`; the block's value is its last expression. */
+	private emitReturn(node: ts.ReturnStatement): string {
+		if (node.expression === undefined) return ""
+		return `${this.emitExpression(node.expression)};`
 	}
 
 	private emitIf(node: ts.IfStatement): string {
@@ -81,10 +163,12 @@ export class Emitter {
 			case ts.SyntaxKind.PrefixUnaryExpression:
 				return this.emitPrefixUnary(node as ts.PrefixUnaryExpression)
 
-			case ts.SyntaxKind.Identifier:
-				// NOTE: emitted verbatim for now. SQF local variables must be `_`-prefixed;
-				// a naming/scope convention is still TODO before real variable support.
-				return (node as ts.Identifier).text
+			case ts.SyntaxKind.Identifier: {
+				// SQF locals must be `_`-prefixed; everything else (function names, etc.)
+				// is emitted verbatim.
+				const name = (node as ts.Identifier).text
+				return this.locals.has(name) ? `_${name}` : name
+			}
 
 			case ts.SyntaxKind.StringLiteral:
 				return this.emitString((node as ts.StringLiteral).text)
@@ -132,39 +216,50 @@ export class Emitter {
 	private emitCall(node: ts.CallExpression): string {
 		const args = node.arguments.map((arg) => this.emitExpression(arg))
 
-		// Namespace member call, e.g. `bis.crewCount(...)` or `diag.log(...)`.
+		// Property-access callee: either a namespace member (`bis.crewCount(...)`)
+		// or a method on a value (`x.toString()`).
 		if (ts.isPropertyAccessExpression(node.expression)) {
-			return this.emitNamespaceCall(node.expression, args)
+			const callee = node.expression
+			const namespace = ts.isIdentifier(callee.expression)
+				? this.importedNamespaces.get(callee.expression.text)
+				: undefined
+			if (namespace !== undefined) {
+				const command = `${namespace.sqfPrefix}${callee.name.text}`
+				return namespace.form === "call"
+					? this.emitFunctionCall(command, args)
+					: this.emitCommandCall(command, args)
+			}
+			return this.emitMethodCall(callee, args)
 		}
 
 		if (!ts.isIdentifier(node.expression)) {
 			throw new UnsupportedSyntaxError(node.expression, this.sourceFile,
 				"only direct function calls are supported")
 		}
-		const command = this.importAliases.get(node.expression.text)
-		if (command === undefined) {
-			throw new UnsupportedSyntaxError(
-				node.expression, this.sourceFile,
-				`call to "${node.expression.text}" has no SQF mapping`,
-			)
-		}
-		return this.emitCommandCall(command, args)
+		const name = node.expression.text
+		const command = this.importAliases.get(name)
+		if (command !== undefined) return this.emitCommandCall(command, args)
+		if (this.userFunctions.has(name)) return this.emitFunctionCall(name, args)
+		throw new UnsupportedSyntaxError(
+			node.expression, this.sourceFile,
+			`call to "${name}" has no SQF mapping`,
+		)
 	}
 
-	private emitNamespaceCall(callee: ts.PropertyAccessExpression, args: string[]): string {
-		if (!ts.isIdentifier(callee.expression)) {
-			throw new UnsupportedSyntaxError(callee.expression, this.sourceFile,
-				"only calls on an imported namespace are supported")
+	/** A zero-arg value method, e.g. `x.toString()` -> `(str x)`. */
+	private emitMethodCall(callee: ts.PropertyAccessExpression, args: string[]): string {
+		const method = callee.name.text
+		const command = METHOD_MAPPINGS.get(method)
+		if (command === undefined) {
+			throw new UnsupportedSyntaxError(callee.name, this.sourceFile,
+				`method "${method}" has no SQF mapping`)
 		}
-		const namespace = this.importedNamespaces.get(callee.expression.text)
-		if (namespace === undefined) {
-			throw new UnsupportedSyntaxError(callee.expression, this.sourceFile,
-				`"${callee.expression.text}" is not an imported intrinsic namespace`)
+		if (args.length > 0) {
+			throw new UnsupportedSyntaxError(callee.name, this.sourceFile,
+				`method "${method}" with arguments is not supported`)
 		}
-		const command = `${namespace.sqfPrefix}${callee.name.text}`
-		return namespace.form === "call"
-			? this.emitFunctionCall(command, args)
-			: this.emitCommandCall(command, args)
+		// Parenthesized so it stays a single operand when used as a command argument.
+		return `(${command} ${this.emitExpression(callee.expression)})`
 	}
 
 	/** Unary SQF command form: `cmd arg`, or `cmd [a, b]` for multiple args, or bare `cmd` for none. */

@@ -45,11 +45,47 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.equal(sqf.trim(), `"x" call BIS_fnc_crewCount;`)
 	})
 
-	test("rejects a member call on something that is not an imported namespace", () => {
+	test("rejects a member call that is neither a namespace nor a mapped method", () => {
 		assert.throws(
 			() => emit(`foo.bar("x")`),
 			(err: unknown) =>
-				err instanceof UnsupportedSyntaxError && /not an imported intrinsic namespace/.test(err.message),
+				err instanceof UnsupportedSyntaxError && /method "bar" has no SQF mapping/.test(err.message),
+		)
+	})
+
+	test("emits a user function as a global SQF code block called via `call`", () => {
+		const sqf = emit(
+			`import { bis } from "js-to-sqf"\n` +
+			`function getCrewCount() {\n\treturn bis.crewCount("B_Heli_Light_01_F", false)\n}\n` +
+			`getCrewCount()`,
+		)
+		assert.match(sqf, /getCrewCount = \{\n\t\["B_Heli_Light_01_F", false\] call BIS_fnc_crewCount;\n\};/)
+		assert.match(sqf, /^call getCrewCount;$/m)
+	})
+
+	test("emits a function parameter as a `params` binding and `_`-prefixed reference", () => {
+		const sqf = emit(
+			`import { systemChat } from "js-to-sqf"\nfunction greet(name) {\n\tsystemChat(name)\n}`,
+		)
+		assert.match(sqf, /greet = \{\n\tparams \["_name"\];\n\tsystemChat _name;\n\};/)
+	})
+
+	test("declares a local with `private` and `_`-prefixes later references", () => {
+		const sqf = emit(`import { systemChat } from "js-to-sqf"\nconst msg = "hi"\nsystemChat(msg)`)
+		assert.match(sqf, /^private _msg = "hi";$/m)
+		assert.match(sqf, /^systemChat _msg;$/m)
+	})
+
+	test("maps .toString() to the SQF `str` command", () => {
+		const sqf = emit(`import { systemChat } from "js-to-sqf"\nconst n = 1\nsystemChat(n.toString())`)
+		assert.match(sqf, /systemChat \(str _n\);/)
+	})
+
+	test("rejects a method with no SQF mapping", () => {
+		assert.throws(
+			() => emit(`const s = "x"\ns.padStart(3)`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /method "padStart" has no SQF mapping/.test(err.message),
 		)
 	})
 
