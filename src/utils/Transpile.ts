@@ -84,7 +84,7 @@ export function initScriptOutputPath(handlerName: string, projectDir: string): s
 
 /** Output path for a user function: flat in the `sqf/` directory, e.g. `<dir>/sqf/getCrewCount.sqf`. */
 export function functionOutputPath(functionName: string, projectDir: string): string {
-	return resolve(projectDir, SQF_OUTPUT_DIR, `${functionName}.sqf`)
+	return resolve(projectDir, SQF_OUTPUT_DIR, `fn_${functionName}.sqf`)
 }
 
 /** The line each init script runs to define every static const global before use. */
@@ -157,7 +157,7 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
 		})
 	}
 
-	// User functions (from any file) -> sqf/<name>.sqf.
+	// User functions (from any file) -> sqf/fn_<name>.sqf.
 	for (const fn of project.functions.values()) {
 		const sourceFile = program.getSourceFile(fn.sourceFileName)!
 		const body = new Emitter(sourceFile, project).emitFunctionBody(fn.node)
@@ -184,7 +184,7 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
 export function generateCfgFunctions(project: ProjectModel): string {
 	const entries = [...project.functions.values()]
 		.sort((a: FunctionDef, b: FunctionDef) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-		.map((fn) => `\t\t\tclass ${fn.name} { file = "${SQF_OUTPUT_DIR}\\${fn.name}.sqf"; };`)
+		.map((fn) => `\t\t\tclass ${fn.name} { file = "${SQF_OUTPUT_DIR}"; };`)
 		.join("\n")
 	return `class CfgFunctions {\n\tclass JS {\n\t\tclass functions {\n${entries}\n\t\t};\n\t};\n};\n`
 }

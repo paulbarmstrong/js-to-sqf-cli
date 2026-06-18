@@ -55,7 +55,7 @@ test("produces the expected set of output files", async () => {
 			"initPlayerLocal.sqf",
 			"initServer.sqf",
 			"sqf/constants.sqf",
-			"sqf/getCrew.sqf",
+			"sqf/fn_getCrew.sqf",
 		],
 	)
 })
@@ -84,10 +84,10 @@ test("each init script loads constants and resolves consts to their globals", as
 
 test("functions go to flat sqf/ files (body only) and are registered in CfgFunctions.hpp", async () => {
 	const out = await transpile({ "src/index.ts": INDEX, "src/config.ts": CONFIG })
-	assert.equal(out.get("sqf/getCrew.sqf")!.trim(),
+	assert.equal(out.get("sqf/fn_getCrew.sqf")!.trim(),
 		`["B_Heli_Light_01_F", false] call BIS_fnc_crewCount;`)
 	assert.match(out.get("CfgFunctions.hpp")!,
-		/class getCrew \{ file = "sqf\\getCrew\.sqf"; \};/)
+		/class getCrew \{ file = "sqf"; \};/)
 })
 
 test("output is deterministic across re-runs (no churn under --watch)", async () => {

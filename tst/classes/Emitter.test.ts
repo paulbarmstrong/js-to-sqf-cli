@@ -145,6 +145,15 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		)
 	})
 
+	test("rejects a function declared inside another function", () => {
+		assert.throws(
+			() => emitFn(`function outer() {\n\tfunction inner() {}\n}`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError &&
+				/nested functions are not supported/.test(err.message),
+		)
+	})
+
 	test("allows mutating a local variable inside a function", () => {
 		const body = emitFn(`function f() {\n\tlet x = 1\n\tx = 2\n}`)
 		assert.match(body, /^private _x = 1;$/m)

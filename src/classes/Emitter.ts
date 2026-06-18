@@ -116,7 +116,13 @@ export class Emitter {
 				return ""
 
 			case ts.SyntaxKind.FunctionDeclaration:
-				// Functions are emitted to their own `sqf/` file, not inline.
+				// Nested functions have no SQF representation; a function inside a body
+				// would otherwise be silently dropped. A top-level function reaching here
+				// (only via emitFile) is emitted to its own `sqf/` file, not inline.
+				if (this.inFunctionBody) {
+					throw new UnsupportedSyntaxError(node, this.sourceFile,
+						"nested functions are not supported; declare functions at the top level")
+				}
 				return ""
 
 			case ts.SyntaxKind.ExpressionStatement:
