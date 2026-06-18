@@ -6,20 +6,22 @@ import ts from "typescript"
 
 import { Emitter } from "../../src/classes/Emitter"
 import { UnsupportedSyntaxError } from "../../src/classes/UnsupportedSyntaxError"
+import { buildProjectModel } from "../../src/classes/ProjectModel"
 
-/** Parse `code` in-memory and emit SQF — the unified traversal validates as it emits. */
+/** Parse `code` in-memory and emit SQF — the unified traversal validates as it emits.
+ * A project model is built from the single file so same-file functions/consts resolve. */
 function emit(code: string, fileName = "test.js"): string {
 	const sourceFile = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true)
-	return new Emitter(sourceFile).emitFile()
+	return new Emitter(sourceFile, buildProjectModel([sourceFile], ".")).emitFile()
 }
 
 /** Parse `code` and emit the body of its first function declaration — the contents
- * of the `sqf/<name>.sqf` file that function would produce. */
+ * of the `sqf/fn_<name>_<hash>.sqf` file that function would produce. */
 function emitFn(code: string, fileName = "test.js"): string {
 	const sourceFile = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true)
 	const fn = sourceFile.statements.find(ts.isFunctionDeclaration)
 	assert.ok(fn, "expected a function declaration")
-	return new Emitter(sourceFile).emitFunctionBody(fn)
+	return new Emitter(sourceFile, buildProjectModel([sourceFile], ".")).emitFunctionBody(fn)
 }
 
 describe("emitSourceFile (validate + emit in one pass)", () => {
@@ -71,7 +73,7 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		)
 		// The function body is written to its own file, not inlined here.
 		assert.doesNotMatch(sqf, /getCrewCount = \{/)
-		assert.match(sqf.trim(), /^call JS_fnc_getCrewCount;$/)
+		assert.match(sqf.trim(), /^call JS_fnc_getCrewCount_[0-9a-f]{8};$/)
 	})
 
 	test("emits a function body (its own SQF file) without a wrapper", () => {
@@ -91,7 +93,7 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 
 	test("emits a single-arg user function call as `arg call JS_fnc_<name>`", () => {
 		const sqf = emit(`function greet(name) {}\ngreet("bob")`)
-		assert.match(sqf.trim(), /^"bob" call JS_fnc_greet;$/)
+		assert.match(sqf.trim(), /^"bob" call JS_fnc_greet_[0-9a-f]{8};$/)
 	})
 
 	test("declares a local with `private` and `_`-prefixes later references", () => {

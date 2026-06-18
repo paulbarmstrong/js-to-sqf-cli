@@ -82,9 +82,10 @@ export function initScriptOutputPath(handlerName: string, projectDir: string): s
 	return resolve(projectDir, `${handlerName}.sqf`)
 }
 
-/** Output path for a user function: flat in the `sqf/` directory, e.g. `<dir>/sqf/getCrewCount.sqf`. */
-export function functionOutputPath(functionName: string, projectDir: string): string {
-	return resolve(projectDir, SQF_OUTPUT_DIR, `fn_${functionName}.sqf`)
+/** Output path for a user function: flat in the `sqf/` directory, with the BI
+ * `fn_` discovery prefix, e.g. `<dir>/sqf/fn_getCrewCount_a1b2c3d4.sqf`. */
+export function functionOutputPath(functionGlobalName: string, projectDir: string): string {
+	return resolve(projectDir, SQF_OUTPUT_DIR, `fn_${functionGlobalName}.sqf`)
 }
 
 /** The line each init script runs to define every static const global before use. */
@@ -162,7 +163,7 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
 		const sourceFile = program.getSourceFile(fn.sourceFileName)!
 		const body = new Emitter(sourceFile, project).emitFunctionBody(fn.node)
 		outputs.push({
-			outPath: functionOutputPath(fn.name, projectDir),
+			outPath: functionOutputPath(fn.globalName, projectDir),
 			sqf: body + (body.length > 0 ? "\n" : ""),
 		})
 	}
@@ -183,8 +184,8 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
  * deterministic output (no churn across re-runs). */
 export function generateCfgFunctions(project: ProjectModel): string {
 	const entries = [...project.functions.values()]
-		.sort((a: FunctionDef, b: FunctionDef) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-		.map((fn) => `\t\t\tclass ${fn.name} { file = "${SQF_OUTPUT_DIR}"; };`)
+		.sort((a: FunctionDef, b: FunctionDef) => (a.globalName < b.globalName ? -1 : a.globalName > b.globalName ? 1 : 0))
+		.map((fn) => `\t\t\tclass ${fn.globalName} { file = "${SQF_OUTPUT_DIR}"; };`)
 		.join("\n")
 	return `class CfgFunctions {\n\tclass JS {\n\t\tclass functions {\n${entries}\n\t\t};\n\t};\n};\n`
 }

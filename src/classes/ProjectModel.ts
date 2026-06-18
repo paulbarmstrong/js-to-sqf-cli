@@ -5,10 +5,13 @@ import { MISSION_HANDLER_NAMES } from "../utils/Constants.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
 /** A user-defined function discovered anywhere under `src/`. Each becomes its own
- * `sqf/<name>.sqf` file, registered in `CfgFunctions.hpp` as `JS_fnc_<name>`. */
+ * `sqf/fn_<globalName>.sqf` file, registered in `CfgFunctions.hpp` as `JS_fnc_<globalName>`. */
 export interface FunctionDef {
-	/** Global function name; also the SQF file base name and `JS_fnc_` suffix. */
+	/** The declared (JS) function name. */
 	name: string
+	/** Unique, deterministic global name (`<name>_<hash>`); the CfgFunctions class name
+	 * and `JS_fnc_` suffix. The hash makes same-named functions in different files unique. */
+	globalName: string
 	sourceFileName: string
 	node: ts.FunctionDeclaration
 }
@@ -34,7 +37,8 @@ export interface MissionHandler {
 /** A project-wide registry, built once before emission, that gives each `Emitter`
  * the cross-file knowledge it needs to resolve identifiers. */
 export interface ProjectModel {
-	/** functionName -> definition. The function namespace is global to the project. */
+	/** `${sourceFileName}#${name}` -> definition. Keyed by file so two files may
+	 * declare a same-named function (each gets a distinct hashed global name). */
 	functions: Map<string, FunctionDef>
 	/** `${sourceFileName}#${localName}` -> module-const global. */
 	consts: Map<string, ConstGlobal>
@@ -62,10 +66,11 @@ export function resolveRelativeImport(importingFile: string, spec: string, files
 	return candidates.find((candidate) => files.has(candidate))
 }
 
-/** A deterministic, collision-resistant suffix so two same-named consts in different
- * files don't clash. Derived from the project-relative path + name so it is stable
- * across re-runs (no churn under `--watch`) and across machines. */
-function globalConstName(sourceFileName: string, localName: string, projectDir: string): string {
+/** A deterministic, collision-resistant global name (`<localName>_<hash>`) so two
+ * same-named symbols (consts or functions) in different files don't clash. Derived
+ * from the project-relative path + name, so it is stable across re-runs (no churn
+ * under `--watch`) and across machines. */
+function hashedGlobalName(sourceFileName: string, localName: string, projectDir: string): string {
 	const relPath = relative(projectDir, sourceFileName).split(sep).join("/")
 	const hash = createHash("sha1").update(`${relPath}#${localName}`).digest("hex").slice(0, 8)
 	return `${localName}_${hash}`
@@ -98,9 +103,8 @@ function isLiteralInitializer(expr: ts.Expression): boolean {
 	}
 }
 
-/** Discover all functions (globally named) and all module-level consts (materialized
- * as global SQF variables). Function name collisions and non-literal module consts
- * are errors. */
+/** Discover all functions and all module-level consts, each assigned a unique
+ * deterministic global name. Non-literal module consts are an error. */
 export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDir: string): ProjectModel {
 	const files = new Set(userFiles.map((sf) => sf.fileName))
 	const functions = new Map<string, FunctionDef>()
@@ -110,13 +114,12 @@ export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDi
 		for (const statement of sourceFile.statements) {
 			if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
 				const name = statement.name.text
-				const existing = functions.get(name)
-				if (existing !== undefined) {
-					throw new UnsupportedSyntaxError(statement, sourceFile,
-						`function "${name}" is already defined in ${relative(projectDir, existing.sourceFileName)}; ` +
-						"function names must be unique across the project")
-				}
-				functions.set(name, { name, sourceFileName: sourceFile.fileName, node: statement })
+				functions.set(constKey(sourceFile.fileName, name), {
+					name,
+					globalName: hashedGlobalName(sourceFile.fileName, name, projectDir),
+					sourceFileName: sourceFile.fileName,
+					node: statement,
+				})
 			} else if (isModuleConstStatement(statement)) {
 				for (const declaration of statement.declarationList.declarations) {
 					if (!ts.isIdentifier(declaration.name)) continue
@@ -127,7 +130,7 @@ export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDi
 					const name = declaration.name.text
 					consts.set(constKey(sourceFile.fileName, name), {
 						localName: name,
-						globalName: globalConstName(sourceFile.fileName, name, projectDir),
+						globalName: hashedGlobalName(sourceFile.fileName, name, projectDir),
 						sourceFileName: sourceFile.fileName,
 						node: declaration,
 					})

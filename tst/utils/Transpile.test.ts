@@ -47,17 +47,13 @@ const CONFIG = `export const TABLE = [[1, 2], [3, 4]]\n`
 
 test("produces the expected set of output files", async () => {
 	const out = await transpile({ "src/index.ts": INDEX, "src/config.ts": CONFIG })
+	const keys = [...out.keys()].sort()
 	assert.deepEqual(
-		[...out.keys()].sort(),
-		[
-			"CfgFunctions.hpp",
-			"init.sqf",
-			"initPlayerLocal.sqf",
-			"initServer.sqf",
-			"sqf/constants.sqf",
-			"sqf/fn_getCrew.sqf",
-		],
+		keys.filter((k) => !k.startsWith("sqf/fn_")),
+		["CfgFunctions.hpp", "init.sqf", "initPlayerLocal.sqf", "initServer.sqf", "sqf/constants.sqf"],
 	)
+	// The function file carries the BI `fn_` prefix and the uniqueness hash.
+	assert.ok(keys.some((k) => /^sqf\/fn_getCrew_[0-9a-f]{8}\.sqf$/.test(k)))
 })
 
 test("collects all module consts (incl. cross-file) into sqf/constants.sqf", async () => {
@@ -79,15 +75,16 @@ test("each init script loads constants and resolves consts to their globals", as
 	assert.match(playerLocal, /^systemChat \(str TABLE_[0-9a-f]{8}\);$/m)
 
 	const init = out.get("init.sqf")!
-	assert.match(init, /^call JS_fnc_getCrew;$/m)
+	assert.match(init, /^call JS_fnc_getCrew_[0-9a-f]{8};$/m)
 })
 
 test("functions go to flat sqf/ files (body only) and are registered in CfgFunctions.hpp", async () => {
 	const out = await transpile({ "src/index.ts": INDEX, "src/config.ts": CONFIG })
-	assert.equal(out.get("sqf/fn_getCrew.sqf")!.trim(),
+	const fnKey = [...out.keys()].find((k) => /^sqf\/fn_getCrew_[0-9a-f]{8}\.sqf$/.test(k))!
+	assert.equal(out.get(fnKey)!.trim(),
 		`["B_Heli_Light_01_F", false] call BIS_fnc_crewCount;`)
 	assert.match(out.get("CfgFunctions.hpp")!,
-		/class getCrew \{ file = "sqf"; \};/)
+		/class getCrew_[0-9a-f]{8} \{ file = "sqf"; \};/)
 })
 
 test("output is deterministic across re-runs (no churn under --watch)", async () => {
@@ -149,6 +146,24 @@ test("does not duplicate the include if already present", async () => {
 	} finally {
 		await rm(dir, { recursive: true, force: true })
 	}
+})
+
+test("allows same-named functions in different files (no collision)", async () => {
+	const out = await transpile({
+		"src/index.ts":
+			`import { defineMission } from "js-to-sqf"\n` +
+			`import { helper as a } from "./a"\n` +
+			`import { helper as b } from "./b"\n` +
+			`export default defineMission({ init: () => { a(); b() } })\n`,
+		"src/a.ts": `export function helper(): number { return 1 }\n`,
+		"src/b.ts": `export function helper(): number { return 2 }\n`,
+	})
+	// Two distinct function files, one per same-named function.
+	const fnFiles = [...out.keys()].filter((k) => /^sqf\/fn_helper_[0-9a-f]{8}\.sqf$/.test(k))
+	assert.equal(fnFiles.length, 2)
+	// init calls two distinct globals.
+	const calls = new Set(out.get("init.sqf")!.match(/JS_fnc_helper_[0-9a-f]{8}/g) ?? [])
+	assert.equal(calls.size, 2)
 })
 
 test("rejects a non-literal module-level const", async () => {

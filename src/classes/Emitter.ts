@@ -1,6 +1,6 @@
 import ts from "typescript"
 import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
-import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
+import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
 export class Emitter {
@@ -10,14 +10,11 @@ export class Emitter {
 	/** local name (possibly aliased) -> namespace convention, for imports like `bis`/`diag` */
 	private importedNamespaces = new Map<string, NamespaceMapping>()
 
-	/** names of user-defined functions, called via SQF `call` (e.g. `call getCrewCount`) */
-	private userFunctions = new Set<string>()
-
 	/** local name -> cross-file const imported into this file (resolves to a global) */
 	private importedConsts = new Map<string, ConstGlobal>()
 
-	/** local name (possibly aliased) -> original user-function name, for relative imports */
-	private importedFunctions = new Map<string, string>()
+	/** local name (possibly aliased) -> function imported into this file via a relative import */
+	private importedFunctions = new Map<string, FunctionDef>()
 
 	/** in-scope local variable/parameter names; references are `_`-prefixed in SQF */
 	private locals = new Set<string>()
@@ -32,18 +29,16 @@ export class Emitter {
 		private readonly project: ProjectModel = EMPTY_PROJECT_MODEL,
 	) {}
 
-	/** Register this file's imports and function names before any emission. Both
-	 * top-level emission and per-function-file emission depend on this, and a
-	 * function body can reference imports declared earlier in the file, so the
-	 * registration can't rely on in-order statement traversal. Idempotent. */
+	/** Register this file's imports before any emission. A function body can reference
+	 * imports declared earlier in the file, so registration can't rely on in-order
+	 * statement traversal. Same-file functions are resolved via the project model.
+	 * Idempotent. */
 	private prepare(): void {
 		if (this.prepared) return
 		this.prepared = true
 		for (const statement of this.sourceFile.statements) {
 			if (ts.isImportDeclaration(statement)) {
 				this.registerImport(statement)
-			} else if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
-				this.userFunctions.add(statement.name.text)
 			}
 		}
 	}
@@ -320,12 +315,12 @@ export class Emitter {
 		const name = node.expression.text
 		const command = this.importAliases.get(name)
 		if (command !== undefined) return this.emitCommandCall(command, args)
-		// A user function (declared here, imported under an alias, or anywhere in the
-		// project) is invoked via its CfgFunctions handle `JS_fnc_<name>`.
-		const resolved = this.importedFunctions.get(name)
-			?? ((this.userFunctions.has(name) || this.project.functions.has(name)) ? name : undefined)
-		if (resolved !== undefined) {
-			return this.emitFunctionCall(`JS_fnc_${resolved}`, args)
+		// A user function (imported under any name, or declared in this same file) is
+		// invoked via its CfgFunctions handle `JS_fnc_<globalName>`.
+		const fn = this.importedFunctions.get(name)
+			?? this.project.functions.get(constKey(this.sourceFile.fileName, name))
+		if (fn !== undefined) {
+			return this.emitFunctionCall(`JS_fnc_${fn.globalName}`, args)
 		}
 		throw new UnsupportedSyntaxError(
 			node.expression, this.sourceFile,
@@ -406,18 +401,18 @@ export class Emitter {
 		const bindings = node.importClause?.namedBindings
 		if (bindings === undefined || !ts.isNamedImports(bindings)) return
 		const targetFile = resolveRelativeImport(this.sourceFile.fileName, spec, this.project.files)
+		if (targetFile === undefined) return
 		for (const element of bindings.elements) {
 			const localName = element.name.text
 			const originalName = (element.propertyName ?? element.name).text
-			if (this.project.functions.has(originalName)) {
-				this.importedFunctions.set(localName, originalName)
+			const fn = this.project.functions.get(constKey(targetFile, originalName))
+			if (fn !== undefined) {
+				this.importedFunctions.set(localName, fn)
 				continue
 			}
-			if (targetFile !== undefined) {
-				const c = this.project.consts.get(constKey(targetFile, originalName))
-				if (c !== undefined) {
-					this.importedConsts.set(localName, c)
-				}
+			const c = this.project.consts.get(constKey(targetFile, originalName))
+			if (c !== undefined) {
+				this.importedConsts.set(localName, c)
 			}
 		}
 	}
