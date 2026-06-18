@@ -2,15 +2,23 @@ import ts from "typescript"
 
 export const TYPES_PACKAGE_NAME = "js-to-sqf"
 
-/** Entry files are resolved relative to this directory within the project. */
+/** Source files are resolved relative to this directory within the project. */
 export const SRC_DIR = "src"
 
-export const ENTRY_FILE_NAMES = [
-	"initPlayerLocal.js",
-	"initPlayerLocal.ts",
-	"initServer.js",
-	"initServer.ts"
-]
+/** Directory (under the project root) that generated function files are written to. */
+export const SQF_OUTPUT_DIR = "sqf"
+
+/** The mission entry point: a default-exported `defineMission({...})`. */
+export const INDEX_FILE_NAMES = ["index.ts", "index.js"]
+
+/** Generated file (under `sqf/`) holding every static const global definition. */
+export const CONSTANTS_FILE_NAME = "constants.sqf"
+
+/** Generated config (at the project root) registering every function as `JS_fnc_<name>`. */
+export const CFG_FUNCTIONS_FILE_NAME = "CfgFunctions.hpp"
+
+/** MissionDefinition handlers, each emitted to a root `<name>.sqf` init script. */
+export const MISSION_HANDLER_NAMES = ["init", "initServer", "initPlayerLocal"]
 
 export const BINARY_OPERATOR_MAPPINGS: Map<ts.SyntaxKind, string> = new Map([
 	[ts.SyntaxKind.PlusToken, "+"],
@@ -28,6 +36,18 @@ export const BINARY_OPERATOR_MAPPINGS: Map<ts.SyntaxKind, string> = new Map([
 	[ts.SyntaxKind.ExclamationEqualsToken, "!="],
 	[ts.SyntaxKind.AmpersandAmpersandToken, "&&"],
 	[ts.SyntaxKind.BarBarToken, "||"],
+])
+
+/** Assignment operators. The value is the underlying binary operator a compound
+ * assignment desugars to (`x += y` -> `x = x + y`); `null` is plain `=`. SQF has no
+ * compound-assignment operators, so they must be expanded. */
+export const ASSIGNMENT_OPERATOR_MAPPINGS: Map<ts.SyntaxKind, string | null> = new Map([
+	[ts.SyntaxKind.EqualsToken, null],
+	[ts.SyntaxKind.PlusEqualsToken, "+"],
+	[ts.SyntaxKind.MinusEqualsToken, "-"],
+	[ts.SyntaxKind.AsteriskEqualsToken, "*"],
+	[ts.SyntaxKind.SlashEqualsToken, "/"],
+	[ts.SyntaxKind.PercentEqualsToken, "%"],
 ])
 
 export const PREFIX_OPERATOR_MAPPINGS: Map<ts.SyntaxKind, string> = new Map([

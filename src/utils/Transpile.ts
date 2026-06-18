@@ -1,35 +1,32 @@
-import { basename, dirname, extname, relative, resolve } from "node:path"
-import { CONSUMER_TS_COMPILER_OPTIONS, ENTRY_FILE_NAMES, SRC_DIR } from "./Constants.js"
-import { mkdir, stat, writeFile } from "node:fs/promises"
+import { dirname, relative, resolve } from "node:path"
+import { CFG_FUNCTIONS_FILE_NAME, CONSTANTS_FILE_NAME, CONSUMER_TS_COMPILER_OPTIONS, INDEX_FILE_NAMES, SQF_OUTPUT_DIR, SRC_DIR } from "./Constants.js"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import ts from "typescript"
-import { Emitter, UnsupportedSyntaxError } from "../classes/Emitter.js"
+import { Emitter } from "../classes/Emitter.js"
+import { UnsupportedSyntaxError } from "../classes/UnsupportedSyntaxError.js"
+import { buildProjectModel, extractMissionHandlers, FunctionDef, ProjectModel } from "../classes/ProjectModel.js"
 
 export async function transpile(projectDir: string) {
 	console.log(`Transpiling ${projectDir}...`)
 
-	const entryFiles = (await Promise.all(
-		ENTRY_FILE_NAMES.map(fileName => resolve(projectDir, SRC_DIR, fileName)).map(async candidate => {
+	const indexFile = (await Promise.all(
+		INDEX_FILE_NAMES.map(fileName => resolve(projectDir, SRC_DIR, fileName)).map(async candidate => {
 			try {
 				return (await stat(candidate)).isFile() ? candidate : undefined
 			} catch {
 				return undefined
 			}
 		})
-	)).filter(x => x !== undefined)
+	)).find(x => x !== undefined)
 
-	if (entryFiles.length === 0) {
-		console.error(`Error: no entry file found in ${resolve(projectDir, SRC_DIR)}. Expected one of: ${ENTRY_FILE_NAMES.join(", ")}`)
+	if (indexFile === undefined) {
+		console.error(`Error: no entry point found. Expected one of: ${INDEX_FILE_NAMES.map(n => `${SRC_DIR}/${n}`).join(", ")}`)
 		return
 	}
-	
+
+	let transpiled: TranspiledFile[]
 	try {
-		const transpiled = transpileFiles(entryFiles, projectDir)
-		await Promise.all(transpiled.map(async (file) => {
-			const outPath = sqfOutputPath(file.fileName, projectDir)
-			await mkdir(dirname(outPath), { recursive: true })
-			await writeFile(outPath, file.sqf)
-			console.log(`Wrote ${relative(projectDir, outPath)}`)
-		}))
+		transpiled = transpileProject(indexFile, projectDir)
 	} catch (err) {
 		if (err instanceof UnsupportedSyntaxError) {
 			console.error(`Unsupported syntax: ${err.message}`)
@@ -37,43 +34,90 @@ export async function transpile(projectDir: string) {
 		}
 		throw err
 	}
+
+	await cleanStaleFunctionFiles(projectDir, transpiled)
+	await Promise.all(transpiled.map(async (file) => {
+		await mkdir(dirname(file.outPath), { recursive: true })
+		await writeFile(file.outPath, file.sqf)
+		console.log(`Wrote ${relative(projectDir, file.outPath)}`)
+	}))
+
+	// CfgFunctions only takes effect if description.ext includes it, so wire it up.
+	if (transpiled.some((file) => file.outPath === resolve(projectDir, CFG_FUNCTIONS_FILE_NAME))) {
+		await ensureCfgFunctionsInclude(projectDir)
+	}
+}
+
+/** Ensure the mission's `description.ext` includes the generated `CfgFunctions.hpp`.
+ * Creates the file if absent, appends the include if missing, and is a no-op if it's
+ * already present. */
+async function ensureCfgFunctionsInclude(projectDir: string): Promise<void> {
+	const descriptionPath = resolve(projectDir, "description.ext")
+	const include = `#include "${CFG_FUNCTIONS_FILE_NAME}"`
+	let existing = ""
+	try {
+		existing = await readFile(descriptionPath, "utf8")
+	} catch {
+		// description.ext doesn't exist yet — we'll create it.
+	}
+	if (new RegExp(`#include\\s+"${CFG_FUNCTIONS_FILE_NAME}"`).test(existing)) return
+
+	if (existing.length === 0) {
+		await writeFile(descriptionPath, `${include}\n`)
+		console.log("Created description.ext")
+	} else {
+		await writeFile(descriptionPath, `${existing}${existing.endsWith("\n") ? "" : "\n"}${include}\n`)
+		console.log("Added #include to description.ext")
+	}
 }
 
 export interface TranspiledFile {
-	fileName: string
+	/** Absolute path the SQF should be written to. */
+	outPath: string
 	sqf: string
 }
 
-/** Output path for a transpiled source file. Sources live under `src/`; their layout
- * is mirrored into the project root with a `.sqf` extension.
- * e.g. `<dir>/src/sub/x.ts` -> `<dir>/sub/x.sqf`. */
-export function sqfOutputPath(sourceFileName: string, projectDir: string): string {
-	const relFromSrc = relative(resolve(projectDir, SRC_DIR), sourceFileName)
-	const base = basename(relFromSrc, extname(relFromSrc))
-	return resolve(projectDir, dirname(relFromSrc), `${base}.sqf`)
+/** Output path for a mission init script: the project root, e.g. `<dir>/initServer.sqf`. */
+export function initScriptOutputPath(handlerName: string, projectDir: string): string {
+	return resolve(projectDir, `${handlerName}.sqf`)
 }
 
-export function loadProgram(entryFiles: string[]): ts.Program {
-	const options: ts.CompilerOptions = {
-		allowJs: true,
-		checkJs: false,
-		noLib: true,
-		noEmit: true,
-		target: ts.ScriptTarget.Latest,
-		module: ts.ModuleKind.NodeNext,
-		moduleResolution: ts.ModuleResolutionKind.NodeNext,
+/** Output path for a user function: flat in the `sqf/` directory, e.g. `<dir>/sqf/getCrewCount.sqf`. */
+export function functionOutputPath(functionName: string, projectDir: string): string {
+	return resolve(projectDir, SQF_OUTPUT_DIR, `${functionName}.sqf`)
+}
+
+/** The line each init script runs to define every static const global before use. */
+function constantsLoadLine(): string {
+	return `call compile preprocessFileLineNumbers "${SQF_OUTPUT_DIR}\\${CONSTANTS_FILE_NAME}";`
+}
+
+/** Remove orphaned `sqf/*.sqf` files left over from previously-transpiled functions
+ * that no longer exist (e.g. a function was renamed or deleted in watch mode). */
+async function cleanStaleFunctionFiles(projectDir: string, outputs: TranspiledFile[]): Promise<void> {
+	const sqfDir = resolve(projectDir, SQF_OUTPUT_DIR)
+	const keep = new Set(outputs.map((file) => file.outPath))
+	let entries: string[]
+	try {
+		entries = await readdir(sqfDir)
+	} catch {
+		return // no sqf/ directory yet
 	}
-	return ts.createProgram(entryFiles, options)
+	await Promise.all(entries
+		.filter((entry) => entry.endsWith(".sqf"))
+		.map((entry) => resolve(sqfDir, entry))
+		.filter((path) => !keep.has(path))
+		.map((path) => rm(path)))
 }
 
-export function transpileFiles(entryFiles: string[], rootDir: string): TranspiledFile[] {
+export function transpileProject(indexFile: string, projectDir: string): TranspiledFile[] {
 
-	const program = ts.createProgram(entryFiles, CONSUMER_TS_COMPILER_OPTIONS)
+	const program = ts.createProgram([indexFile], CONSUMER_TS_COMPILER_OPTIONS)
 
 	const syntactic = program.getSyntacticDiagnostics()
 	if (syntactic.length > 0) {
 		const formatted = ts.formatDiagnosticsWithColorAndContext(syntactic, {
-			getCurrentDirectory: () => rootDir,
+			getCurrentDirectory: () => projectDir,
 			getCanonicalFileName: (f) => f,
 			getNewLine: () => "\n",
 		})
@@ -83,11 +127,64 @@ export function transpileFiles(entryFiles: string[], rootDir: string): Transpile
 	const userFiles = program
 		.getSourceFiles()
 		.filter(sf => !program.isSourceFileFromExternalLibrary(sf) && !program.isSourceFileDefaultLibrary(sf))
-	
-	return userFiles.map(sourceFile => {
-		return {
-			fileName: sourceFile.fileName,
-			sqf: new Emitter(sourceFile).emitFile(),
-		}
-	})
+
+	const project = buildProjectModel(userFiles, projectDir)
+	const indexSourceFile = program.getSourceFile(resolve(indexFile))!
+	const handlers = extractMissionHandlers(indexSourceFile)
+
+	const outputs: TranspiledFile[] = []
+
+	// All module-level consts -> a single sqf/constants.sqf (defined once, order-free).
+	const hasConstants = project.consts.size > 0
+	if (hasConstants) {
+		const defs = [...project.consts.values()]
+			.sort((a, b) => (a.globalName < b.globalName ? -1 : a.globalName > b.globalName ? 1 : 0))
+			.map((c) => new Emitter(program.getSourceFile(c.sourceFileName)!, project).emitConstDefinition(c))
+			.join("\n")
+		outputs.push({
+			outPath: resolve(projectDir, SQF_OUTPUT_DIR, CONSTANTS_FILE_NAME),
+			sqf: `${defs}\n`,
+		})
+	}
+
+	// Mission handlers -> root init scripts. Each loads the constants first.
+	for (const handler of handlers) {
+		const body = new Emitter(indexSourceFile, project).emitFunctionBody(handler.node)
+		const parts = [hasConstants ? constantsLoadLine() : "", body].filter((part) => part.length > 0)
+		outputs.push({
+			outPath: initScriptOutputPath(handler.name, projectDir),
+			sqf: parts.join("\n") + (parts.length > 0 ? "\n" : ""),
+		})
+	}
+
+	// User functions (from any file) -> sqf/<name>.sqf.
+	for (const fn of project.functions.values()) {
+		const sourceFile = program.getSourceFile(fn.sourceFileName)!
+		const body = new Emitter(sourceFile, project).emitFunctionBody(fn.node)
+		outputs.push({
+			outPath: functionOutputPath(fn.name, projectDir),
+			sqf: body + (body.length > 0 ? "\n" : ""),
+		})
+	}
+
+	// CfgFunctions.hpp registers each function file as JS_fnc_<name>.
+	if (project.functions.size > 0) {
+		outputs.push({
+			outPath: resolve(projectDir, CFG_FUNCTIONS_FILE_NAME),
+			sqf: generateCfgFunctions(project),
+		})
+	}
+
+	return outputs
+}
+
+/** Build the `CfgFunctions.hpp` config that auto-registers each function file under
+ * the `JS` tag, so Arma exposes them as `JS_fnc_<name>`. Entries are sorted for
+ * deterministic output (no churn across re-runs). */
+export function generateCfgFunctions(project: ProjectModel): string {
+	const entries = [...project.functions.values()]
+		.sort((a: FunctionDef, b: FunctionDef) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+		.map((fn) => `\t\t\tclass ${fn.name} { file = "${SQF_OUTPUT_DIR}\\${fn.name}.sqf"; };`)
+		.join("\n")
+	return `class CfgFunctions {\n\tclass JS {\n\t\tclass functions {\n${entries}\n\t\t};\n\t};\n};\n`
 }

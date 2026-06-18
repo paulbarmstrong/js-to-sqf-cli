@@ -1,16 +1,7 @@
 import ts from "typescript"
-import { BINARY_OPERATOR_MAPPINGS, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
-
-export class UnsupportedSyntaxError extends Error {
-	override name = "UnsupportedSyntaxError"
-	constructor(node: ts.Node, sourceFile: ts.SourceFile, message: string) {
-		const { line, character } = sourceFile.getLineAndCharacterOfPosition(
-			node.getStart(sourceFile),
-		)
-		const where = `${sourceFile.fileName}:${line + 1}:${character + 1}`
-		super(`${where}: ${message}`)
-	}
-}
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
+import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
 export class Emitter {
 	/** local name (possibly aliased) -> SQF command, populated from intrinsic imports */
@@ -22,31 +13,110 @@ export class Emitter {
 	/** names of user-defined functions, called via SQF `call` (e.g. `call getCrewCount`) */
 	private userFunctions = new Set<string>()
 
+	/** local name -> cross-file const imported into this file (resolves to a global) */
+	private importedConsts = new Map<string, ConstGlobal>()
+
+	/** local name (possibly aliased) -> original user-function name, for relative imports */
+	private importedFunctions = new Map<string, string>()
+
 	/** in-scope local variable/parameter names; references are `_`-prefixed in SQF */
 	private locals = new Set<string>()
 
-	constructor(private readonly sourceFile: ts.SourceFile) {}
+	/** whether emission is currently inside a function body; mutation is only allowed there */
+	private inFunctionBody = false
 
-	emitFile(): string {
-		// Function declarations are hoisted in JS, so register their names up front:
-		// a call may textually precede the declaration.
+	private prepared = false
+
+	constructor(
+		private readonly sourceFile: ts.SourceFile,
+		private readonly project: ProjectModel = EMPTY_PROJECT_MODEL,
+	) {}
+
+	/** Register this file's imports and function names before any emission. Both
+	 * top-level emission and per-function-file emission depend on this, and a
+	 * function body can reference imports declared earlier in the file, so the
+	 * registration can't rely on in-order statement traversal. Idempotent. */
+	private prepare(): void {
+		if (this.prepared) return
+		this.prepared = true
 		for (const statement of this.sourceFile.statements) {
-			if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+			if (ts.isImportDeclaration(statement)) {
+				this.registerImport(statement)
+			} else if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
 				this.userFunctions.add(statement.name.text)
 			}
 		}
-		// Statements are emitted in order; imports come first in ES modules, so
-		// the intrinsics map is populated before any call that uses it.
+	}
+
+	/** Emit the file's top-level code. Function declarations emit nothing here —
+	 * each user function is written to its own `sqf/` file (see `emitFunctionBody`). */
+	emitFile(): string {
+		this.prepare()
 		const lines = this.sourceFile.statements
 			.map((statement) => this.emitStatement(statement))
 			.filter((line) => line.length > 0)
 		return lines.join("\n") + (lines.length > 0 ? "\n" : "")
 	}
 
+	/** Emit the body of a function-like node (a user `function`, or a mission handler
+	 * arrow/function-expression/method) as the contents of an SQF file: a `params [...]`
+	 * binding (if any) followed by the body. No `name = { ... }` wrapper — function
+	 * files are compiled directly into `JS_fnc_<name>` and init scripts run their body. */
+	emitFunctionBody(
+		node: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration,
+	): string {
+		this.prepare()
+		if (node.body === undefined) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile, "function has no body")
+		}
+		const paramNames = node.parameters.map((param) => {
+			if (!ts.isIdentifier(param.name)) {
+				throw new UnsupportedSyntaxError(param, this.sourceFile,
+					"destructured parameters are not supported")
+			}
+			return param.name.text
+		})
+
+		// Params and any locals declared inside the body are scoped to this function.
+		const outerLocals = this.locals
+		const outerInFunctionBody = this.inFunctionBody
+		this.locals = new Set(outerLocals)
+		this.inFunctionBody = true
+		paramNames.forEach((name) => this.locals.add(name))
+		const parts: string[] = []
+		if (paramNames.length > 0) {
+			parts.push(`params [${paramNames.map((name) => `"_${name}"`).join(", ")}];`)
+		}
+		// Arrow functions may have a concise (expression) body; everything else a block.
+		const body = ts.isBlock(node.body)
+			? this.emitBlock(node.body)
+			: `${this.emitExpression(node.body)};`
+		if (body.length > 0) parts.push(body)
+		this.locals = outerLocals
+		this.inFunctionBody = outerInFunctionBody
+
+		return parts.join("\n")
+	}
+
+	/** Emit the global-variable definition for a module-level const, e.g. `num_a1b2 = 5;`.
+	 * Collected into `sqf/constants.sqf`. */
+	emitConstDefinition(c: ConstGlobal): string {
+		this.prepare()
+		if (c.node.initializer === undefined) {
+			throw new UnsupportedSyntaxError(c.node, this.sourceFile,
+				`const "${c.localName}" must have an initializer`)
+		}
+		return `${c.globalName} = ${this.emitExpression(c.node.initializer)};`
+	}
+
 	private emitStatement(node: ts.Statement): string {
 		switch (node.kind) {
 			case ts.SyntaxKind.ImportDeclaration:
-				this.registerImport(node as ts.ImportDeclaration)
+				// Already handled in `prepare()`.
+				return ""
+
+			case ts.SyntaxKind.FunctionDeclaration:
+				// Functions are emitted to their own `sqf/` file, not inline.
 				return ""
 
 			case ts.SyntaxKind.ExpressionStatement:
@@ -57,9 +127,6 @@ export class Emitter {
 
 			case ts.SyntaxKind.Block:
 				return this.emitBlock(node as ts.Block)
-
-			case ts.SyntaxKind.FunctionDeclaration:
-				return this.emitFunctionDeclaration(node as ts.FunctionDeclaration)
 
 			case ts.SyntaxKind.VariableStatement:
 				return this.emitVariableStatement(node as ts.VariableStatement)
@@ -79,39 +146,6 @@ export class Emitter {
 			.join("\n")
 	}
 
-	/** A user function becomes a global SQF code block: `name = { params [...]; body };`.
-	 * Params and locals are `_`-prefixed; calls to it use `call` (see `emitCall`). */
-	private emitFunctionDeclaration(node: ts.FunctionDeclaration): string {
-		if (node.name === undefined) {
-			throw new UnsupportedSyntaxError(node, this.sourceFile, "anonymous functions are not supported")
-		}
-		if (node.body === undefined) {
-			throw new UnsupportedSyntaxError(node, this.sourceFile,
-				`function "${node.name.text}" has no body`)
-		}
-		const paramNames = node.parameters.map((param) => {
-			if (!ts.isIdentifier(param.name)) {
-				throw new UnsupportedSyntaxError(param, this.sourceFile,
-					"destructured parameters are not supported")
-			}
-			return param.name.text
-		})
-
-		// Params and any locals declared inside the body are scoped to this function.
-		const outerLocals = this.locals
-		this.locals = new Set(outerLocals)
-		paramNames.forEach((name) => this.locals.add(name))
-		const parts: string[] = []
-		if (paramNames.length > 0) {
-			parts.push(`params [${paramNames.map((name) => `"_${name}"`).join(", ")}];`)
-		}
-		const body = this.emitBlock(node.body)
-		if (body.length > 0) parts.push(body)
-		this.locals = outerLocals
-
-		return `${node.name.text} = {\n${this.indent(parts.join("\n"))}\n};`
-	}
-
 	private emitVariableStatement(node: ts.VariableStatement): string {
 		return node.declarationList.declarations
 			.map((declaration) => this.emitVariableDeclaration(declaration))
@@ -124,6 +158,12 @@ export class Emitter {
 				"destructuring declarations are not supported")
 		}
 		const name = node.name.text
+		// A module-level const becomes a global (defined in sqf/constants.sqf), so its
+		// declaration emits nothing here and it must NOT be registered as a local.
+		// (Reached only via emitFile, which is not used by the CLI; kept for tests.)
+		if (!this.inFunctionBody) {
+			return ""
+		}
 		// Resolve the initializer before binding the name, then register it so later
 		// references emit as `_name`.
 		const out = node.initializer === undefined
@@ -160,15 +200,14 @@ export class Emitter {
 			case ts.SyntaxKind.ParenthesizedExpression:
 				return `(${this.emitExpression((node as ts.ParenthesizedExpression).expression)})`
 
+			case ts.SyntaxKind.ArrayLiteralExpression:
+				return this.emitArrayLiteral(node as ts.ArrayLiteralExpression)
+
 			case ts.SyntaxKind.PrefixUnaryExpression:
 				return this.emitPrefixUnary(node as ts.PrefixUnaryExpression)
 
-			case ts.SyntaxKind.Identifier: {
-				// SQF locals must be `_`-prefixed; everything else (function names, etc.)
-				// is emitted verbatim.
-				const name = (node as ts.Identifier).text
-				return this.locals.has(name) ? `_${name}` : name
-			}
+			case ts.SyntaxKind.Identifier:
+				return this.emitIdentifier(node as ts.Identifier)
 
 			case ts.SyntaxKind.StringLiteral:
 				return this.emitString((node as ts.StringLiteral).text)
@@ -189,6 +228,9 @@ export class Emitter {
 	}
 
 	private emitBinary(node: ts.BinaryExpression): string {
+		if (ASSIGNMENT_OPERATOR_MAPPINGS.has(node.operatorToken.kind)) {
+			return this.emitAssignment(node)
+		}
 		const operator = BINARY_OPERATOR_MAPPINGS.get(node.operatorToken.kind)
 		if (operator === undefined) {
 			throw new UnsupportedSyntaxError(
@@ -197,6 +239,25 @@ export class Emitter {
 			)
 		}
 		return `${this.emitExpression(node.left)} ${operator} ${this.emitExpression(node.right)}`
+	}
+
+	/** Variable mutation. Only allowed inside a function body (the readme forbids
+	 * mutating variables outside functions). Compound assignments are desugared,
+	 * since SQF has no `+=` etc. */
+	private emitAssignment(node: ts.BinaryExpression): string {
+		if (!this.inFunctionBody) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile,
+				"mutating variables outside of functions is not supported")
+		}
+		const compound = ASSIGNMENT_OPERATOR_MAPPINGS.get(node.operatorToken.kind)!
+		const left = this.emitExpression(node.left)
+		const right = this.emitExpression(node.right)
+		return compound === null ? `${left} = ${right}` : `${left} = ${left} ${compound} ${right}`
+	}
+
+	/** A JS array literal maps directly to an SQF array: `[a, b, c]` (empty -> `[]`). */
+	private emitArrayLiteral(node: ts.ArrayLiteralExpression): string {
+		return `[${node.elements.map((element) => this.emitExpression(element)).join(", ")}]`
 	}
 
 	/** SQF string literals are double-quoted; an embedded `"` is escaped by doubling it. */
@@ -211,6 +272,20 @@ export class Emitter {
 				`unsupported unary operator: ${ts.SyntaxKind[node.operator]}`)
 		}
 		return `${operator}${this.emitExpression(node.operand)}`
+	}
+
+	private emitIdentifier(node: ts.Identifier): string {
+		const name = node.text
+		// SQF locals must be `_`-prefixed.
+		if (this.locals.has(name)) return `_${name}`
+		// A module-level const — imported here, or declared in this file — resolves to
+		// its global SQF variable name (defined in sqf/constants.sqf).
+		const imported = this.importedConsts.get(name)
+		if (imported !== undefined) return imported.globalName
+		const own = this.project.consts.get(constKey(this.sourceFile.fileName, name))
+		if (own !== undefined) return own.globalName
+		// Everything else (commands, etc.) is emitted verbatim.
+		return name
 	}
 
 	private emitCall(node: ts.CallExpression): string {
@@ -239,7 +314,13 @@ export class Emitter {
 		const name = node.expression.text
 		const command = this.importAliases.get(name)
 		if (command !== undefined) return this.emitCommandCall(command, args)
-		if (this.userFunctions.has(name)) return this.emitFunctionCall(name, args)
+		// A user function (declared here, imported under an alias, or anywhere in the
+		// project) is invoked via its CfgFunctions handle `JS_fnc_<name>`.
+		const resolved = this.importedFunctions.get(name)
+			?? ((this.userFunctions.has(name) || this.project.functions.has(name)) ? name : undefined)
+		if (resolved !== undefined) {
+			return this.emitFunctionCall(`JS_fnc_${resolved}`, args)
+		}
 		throw new UnsupportedSyntaxError(
 			node.expression, this.sourceFile,
 			`call to "${name}" has no SQF mapping`,
@@ -276,11 +357,14 @@ export class Emitter {
 		return `[${args.join(", ")}] call ${command}`
 	}
 
-	/** Record the SQF command each name from an intrinsic import maps to, and
-	 * reject any import we can't honor. Relative imports register nothing. */
+	/** Record the SQF command each name from an intrinsic import maps to, resolve
+	 * relative imports against the project model, and reject any import we can't honor. */
 	private registerImport(node: ts.ImportDeclaration): void {
 		const spec = (node.moduleSpecifier as ts.StringLiteral).text
-		if (spec.startsWith(".") || spec.startsWith("/")) return // relative import: part of our own graph
+		if (spec.startsWith(".") || spec.startsWith("/")) {
+			this.registerRelativeImport(node, spec)
+			return
+		}
 		if (spec !== TYPES_PACKAGE_NAME) {
 			throw new UnsupportedSyntaxError(node, this.sourceFile,
 				`import of external module "${spec}" cannot be transpiled to SQF`)
@@ -306,6 +390,28 @@ export class Emitter {
 				this.importedNamespaces.set(element.name.text, namespace)
 			} else {
 				this.importAliases.set(element.name.text, importedName)
+			}
+		}
+	}
+
+	/** Resolve a relative import to definitions in another user file: imported
+	 * functions become `JS_fnc_<name>` calls; imported consts become global vars. */
+	private registerRelativeImport(node: ts.ImportDeclaration, spec: string): void {
+		const bindings = node.importClause?.namedBindings
+		if (bindings === undefined || !ts.isNamedImports(bindings)) return
+		const targetFile = resolveRelativeImport(this.sourceFile.fileName, spec, this.project.files)
+		for (const element of bindings.elements) {
+			const localName = element.name.text
+			const originalName = (element.propertyName ?? element.name).text
+			if (this.project.functions.has(originalName)) {
+				this.importedFunctions.set(localName, originalName)
+				continue
+			}
+			if (targetFile !== undefined) {
+				const c = this.project.consts.get(constKey(targetFile, originalName))
+				if (c !== undefined) {
+					this.importedConsts.set(localName, c)
+				}
 			}
 		}
 	}
