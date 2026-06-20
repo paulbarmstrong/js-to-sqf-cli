@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, functionSqfPath, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
@@ -126,6 +126,12 @@ export class Emitter {
 			case ts.SyntaxKind.IfStatement:
 				return this.emitIf(node as ts.IfStatement)
 
+			case ts.SyntaxKind.ForStatement:
+				return this.emitFor(node as ts.ForStatement)
+
+			case ts.SyntaxKind.WhileStatement:
+				return this.emitWhile(node as ts.WhileStatement)
+
 			case ts.SyntaxKind.Block:
 				return this.emitBlock(node as ts.Block)
 
@@ -190,6 +196,45 @@ export class Emitter {
 		return out + ";"
 	}
 
+	/** A C-style `for` maps to SQF's array form: `for [{init}, {cond}, {inc}] do {body}`.
+	 * The loop variable is scoped to the loop. */
+	private emitFor(node: ts.ForStatement): string {
+		const outerLocals = this.locals
+		this.locals = new Set(outerLocals)
+		const init = this.emitForInitializer(node.initializer)
+		const condition = node.condition !== undefined ? this.emitExpression(node.condition) : ""
+		const incrementor = node.incrementor !== undefined ? this.emitExpression(node.incrementor) : ""
+		const body = this.indent(this.emitStatement(node.statement))
+		this.locals = outerLocals
+		return `for [{${init}}, {${condition}}, {${incrementor}}] do {\n${body}\n};`
+	}
+
+	/** The `for` init clause: a `let`/`const` declaration list, an expression, or nothing. */
+	private emitForInitializer(node: ts.ForInitializer | undefined): string {
+		if (node === undefined) return ""
+		if (ts.isVariableDeclarationList(node)) {
+			return node.declarations.map((declaration) => {
+				if (!ts.isIdentifier(declaration.name)) {
+					throw new UnsupportedSyntaxError(declaration.name, this.sourceFile,
+						"destructuring declarations are not supported")
+				}
+				const name = declaration.name.text
+				const init = declaration.initializer !== undefined
+					? ` = ${this.emitExpression(declaration.initializer)}`
+					: ""
+				this.locals.add(name)
+				return `private _${name}${init}`
+			}).join("; ")
+		}
+		return this.emitExpression(node)
+	}
+
+	private emitWhile(node: ts.WhileStatement): string {
+		const condition = this.emitExpression(node.expression)
+		const body = this.indent(this.emitStatement(node.statement))
+		return `while {${condition}} do {\n${body}\n};`
+	}
+
 	private emitExpression(node: ts.Expression): string {
 		switch (node.kind) {
 			case ts.SyntaxKind.CallExpression:
@@ -206,6 +251,9 @@ export class Emitter {
 
 			case ts.SyntaxKind.PrefixUnaryExpression:
 				return this.emitPrefixUnary(node as ts.PrefixUnaryExpression)
+
+			case ts.SyntaxKind.PostfixUnaryExpression:
+				return this.emitPostfixUnary(node as ts.PostfixUnaryExpression)
 
 			case ts.SyntaxKind.Identifier:
 				return this.emitIdentifier(node as ts.Identifier)
@@ -267,6 +315,9 @@ export class Emitter {
 	}
 
 	private emitPrefixUnary(node: ts.PrefixUnaryExpression): string {
+		if (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) {
+			return this.emitIncrementDecrement(node.operand, node.operator === ts.SyntaxKind.PlusPlusToken)
+		}
 		const operator = PREFIX_OPERATOR_MAPPINGS.get(node.operator)
 		if (operator === undefined) {
 			throw new UnsupportedSyntaxError(node, this.sourceFile,
@@ -275,10 +326,31 @@ export class Emitter {
 		return `${operator}${this.emitExpression(node.operand)}`
 	}
 
+	private emitPostfixUnary(node: ts.PostfixUnaryExpression): string {
+		// SQF has no `++`/`--`; both pre- and post-forms desugar to `x = x +/- 1`.
+		return this.emitIncrementDecrement(node.operand, node.operator === ts.SyntaxKind.PlusPlusToken)
+	}
+
+	/** `x++`/`++x`/`x--`/`--x` -> `x = x + 1` / `x = x - 1`. A mutation, so only valid
+	 * inside a function body. The pre/post value distinction is not preserved. */
+	private emitIncrementDecrement(operand: ts.Expression, isIncrement: boolean): string {
+		if (!this.inFunctionBody) {
+			throw new UnsupportedSyntaxError(operand, this.sourceFile,
+				"mutating variables outside of functions is not supported")
+		}
+		const target = this.emitExpression(operand)
+		return `${target} = ${target} ${isIncrement ? "+" : "-"} 1`
+	}
+
 	private emitIdentifier(node: ts.Identifier): string {
 		const name = node.text
 		// SQF locals must be `_`-prefixed.
 		if (this.locals.has(name)) return `_${name}`
+		// A user function referenced as a value (e.g. passed to `addAction`) resolves to
+		// the path of its SQF file, which commands accept as a script parameter.
+		const fn = this.importedFunctions.get(name)
+			?? this.project.functions.get(constKey(this.sourceFile.fileName, name))
+		if (fn !== undefined) return this.emitString(functionSqfPath(fn.globalName))
 		// A module-level const — imported here, or declared in this file — resolves to
 		// its global SQF variable name (defined in sqf/constants.sqf).
 		const imported = this.importedConsts.get(name)
@@ -290,24 +362,28 @@ export class Emitter {
 	}
 
 	private emitCall(node: ts.CallExpression): string {
-		const args = node.arguments.map((arg) => this.emitExpression(arg))
-
-		// Property-access callee: either a namespace member (`bis.crewCount(...)`)
-		// or a method on a value (`x.toString()`).
+		// Property-access callee: a namespace member (`bis.crewCount(...)`), an array
+		// iteration (`arr.forEach(...)`), or a value method (`x.toString()`).
 		if (ts.isPropertyAccessExpression(node.expression)) {
 			const callee = node.expression
 			const namespace = ts.isIdentifier(callee.expression)
 				? this.importedNamespaces.get(callee.expression.text)
 				: undefined
 			if (namespace !== undefined) {
+				const args = node.arguments.map((arg) => this.emitExpression(arg))
 				const command = `${namespace.sqfPrefix}${callee.name.text}`
 				return namespace.form === "call"
 					? this.emitFunctionCall(command, args)
 					: this.emitCommandCall(command, args)
 			}
-			return this.emitMethodCall(callee, args)
+			const iteration = ITERATION_METHOD_MAPPINGS.get(callee.name.text)
+			if (iteration !== undefined) {
+				return this.emitIteration(callee, iteration, node.arguments)
+			}
+			return this.emitMethodCall(callee, node.arguments.map((arg) => this.emitExpression(arg)))
 		}
 
+		const args = node.arguments.map((arg) => this.emitExpression(arg))
 		if (!ts.isIdentifier(node.expression)) {
 			throw new UnsupportedSyntaxError(node.expression, this.sourceFile,
 				"only direct function calls are supported")
@@ -342,6 +418,81 @@ export class Emitter {
 		}
 		// Parenthesized so it stays a single operand when used as a command argument.
 		return `(${command} ${this.emitExpression(callee.expression)})`
+	}
+
+	/** Array iteration (`forEach`/`map`/`filter`) -> the SQF command that runs a code
+	 * block over each element (`forEach`/`apply`/`select`). The callback's element/index
+	 * params are bound to SQF's `_x`/`_forEachIndex`. */
+	private emitIteration(
+		callee: ts.PropertyAccessExpression,
+		mapping: IterationMapping,
+		args: ts.NodeArray<ts.Expression>,
+	): string {
+		const method = callee.name.text
+		if (args.length !== 1) {
+			throw new UnsupportedSyntaxError(callee.name, this.sourceFile,
+				`"${method}" requires a single inline callback`)
+		}
+		const callback = args[0]!
+		if (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) {
+			throw new UnsupportedSyntaxError(callback, this.sourceFile,
+				`"${method}" requires an inline function callback`)
+		}
+		const code = `{\n${this.indent(this.emitIterationBlock(callback, mapping.allowIndex, method))}\n}`
+		const receiver = this.emitIterationReceiver(callee.expression)
+		return mapping.codeFirst
+			? `${code} ${mapping.command} ${receiver}`
+			: `${receiver} ${mapping.command} ${code}`
+	}
+
+	/** Emit an iteration callback's body, binding its element/index params to SQF's
+	 * `_x` and `_forEachIndex`. */
+	private emitIterationBlock(
+		callback: ts.ArrowFunction | ts.FunctionExpression,
+		allowIndex: boolean,
+		method: string,
+	): string {
+		const params = callback.parameters
+		const maxParams = allowIndex ? 2 : 1
+		if (params.length > maxParams) {
+			throw new UnsupportedSyntaxError(callback, this.sourceFile, allowIndex
+				? `"${method}" callback supports at most (element, index) parameters`
+				: `"${method}" callback supports only an element parameter (no index is available)`)
+		}
+
+		const outerLocals = this.locals
+		const outerInFunctionBody = this.inFunctionBody
+		this.locals = new Set(outerLocals)
+		this.inFunctionBody = true
+
+		const bindings: string[] = []
+		const bind = (param: ts.ParameterDeclaration, sqfVar: string) => {
+			if (!ts.isIdentifier(param.name)) {
+				throw new UnsupportedSyntaxError(param, this.sourceFile,
+					"destructured parameters are not supported")
+			}
+			const name = param.name.text
+			this.locals.add(name)
+			// The element magic var is already `_x`, so a param literally named `x` needs no binding.
+			if (`_${name}` !== sqfVar) bindings.push(`private _${name} = ${sqfVar};`)
+		}
+		if (params.length >= 1) bind(params[0]!, "_x")
+		if (params.length >= 2) bind(params[1]!, "_forEachIndex")
+
+		const body = ts.isBlock(callback.body)
+			? this.emitBlock(callback.body)
+			: `${this.emitExpression(callback.body)};`
+
+		this.locals = outerLocals
+		this.inFunctionBody = outerInFunctionBody
+		return [...bindings, body].filter((line) => line.length > 0).join("\n")
+	}
+
+	/** Parenthesize a compound iteration receiver so chained iteration commands
+	 * (`arr.map(...).filter(...)`) and binary expressions associate correctly. */
+	private emitIterationReceiver(expr: ts.Expression): string {
+		const out = this.emitExpression(expr)
+		return ts.isCallExpression(expr) || ts.isBinaryExpression(expr) ? `(${out})` : out
 	}
 
 	/** Unary SQF command form: `cmd arg`, or `cmd [a, b]` for multiple args, or bare `cmd` for none. */

@@ -1,5 +1,5 @@
 import { dirname, relative, resolve } from "node:path"
-import { CFG_FUNCTIONS_FILE_NAME, CONSTANTS_FILE_NAME, CONSUMER_TS_COMPILER_OPTIONS, INDEX_FILE_NAMES, SQF_OUTPUT_DIR, SRC_DIR } from "./Constants.js"
+import { CFG_FUNCTIONS_FILE_NAME, CONSTANTS_FILE_NAME, CONSUMER_TS_COMPILER_OPTIONS, functionFileName, INDEX_FILE_NAMES, SQF_OUTPUT_DIR, SRC_DIR } from "./Constants.js"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import ts from "typescript"
 import { Emitter } from "../classes/Emitter.js"
@@ -85,7 +85,7 @@ export function initScriptOutputPath(handlerName: string, projectDir: string): s
 /** Output path for a user function: flat in the `sqf/` directory, with the BI
  * `fn_` discovery prefix, e.g. `<dir>/sqf/fn_getCrewCount_a1b2c3d4.sqf`. */
 export function functionOutputPath(functionGlobalName: string, projectDir: string): string {
-	return resolve(projectDir, SQF_OUTPUT_DIR, `fn_${functionGlobalName}.sqf`)
+	return resolve(projectDir, SQF_OUTPUT_DIR, functionFileName(functionGlobalName))
 }
 
 /** The line each init script runs to define every static const global before use. */

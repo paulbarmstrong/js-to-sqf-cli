@@ -96,6 +96,11 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(sqf.trim(), /^"bob" call JS_fnc_greet_[0-9a-f]{8};$/)
 	})
 
+	test("substitutes a user function passed as a value with its SQF file path", () => {
+		const sqf = emit(`import { addAction } from "js-to-sqf"\nfunction blowUp() {}\naddAction("Boom", blowUp)`)
+		assert.match(sqf.trim(), /^addAction \["Boom", "sqf\\fn_blowUp_[0-9a-f]{8}\.sqf"\];$/)
+	})
+
 	test("declares a local with `private` and `_`-prefixes later references", () => {
 		const body = emitFn(`import { systemChat } from "js-to-sqf"\nfunction f() {\n\tconst msg = "hi"\n\tsystemChat(msg)\n}`)
 		assert.match(body, /^private _msg = "hi";$/m)
@@ -136,6 +141,54 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		)
 		assert.match(sqf, /if \(1 > 0\) then \{/)
 		assert.match(sqf, /systemChat "x";/)
+	})
+
+	test("emits a C-style for loop as the SQF for-array form", () => {
+		const body = emitFn(`function f() {\n\tfor (let i = 0; i < 3; i++) {}\n}`)
+		assert.match(body, /^for \[\{private _i = 0\}, \{_i < 3\}, \{_i = _i \+ 1\}\] do \{/m)
+	})
+
+	test("emits a while loop with a desugared increment", () => {
+		const body = emitFn(`function f() {\n\tlet n = 0\n\twhile (n < 5) {\n\t\tn++\n\t}\n}`)
+		assert.match(body, /^while \{_n < 5\} do \{$/m)
+		assert.match(body, /^\t_n = _n \+ 1;$/m)
+	})
+
+	test("maps .forEach to the SQF forEach command, binding params to _x/_forEachIndex", () => {
+		const body = emitFn(
+			`import { systemChat } from "js-to-sqf"\n` +
+			`function f() {\n\tconst xs = [1]\n\txs.forEach((item, idx) => { systemChat(item.toString()) })\n}`,
+		)
+		assert.match(body, /^\tprivate _item = _x;$/m)
+		assert.match(body, /^\tprivate _idx = _forEachIndex;$/m)
+		assert.match(body, /\} forEach _xs;/)
+	})
+
+	test("maps .map to apply (element param named x needs no binding)", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.map((x) => x * 2)\n}`)
+		assert.match(body, /private _ys = _xs apply \{/)
+		assert.match(body, /^\t_x \* 2;$/m)
+		assert.doesNotMatch(body, /private _x = _x;/)
+	})
+
+	test("maps .filter to select", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.filter((v) => v > 0)\n}`)
+		assert.match(body, /private _ys = _xs select \{/)
+		assert.match(body, /private _v = _x;/)
+		assert.match(body, /_v > 0;/)
+	})
+
+	test("chains .map().filter() with a parenthesized receiver", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.map((x) => x * 2).filter((x) => x > 0)\n}`)
+		assert.match(body, /private _ys = \(_xs apply \{[\s\S]*?\}\) select \{/)
+	})
+
+	test("rejects an index parameter on .map/.filter (no index available)", () => {
+		assert.throws(
+			() => emitFn(`function f() {\n\tconst xs = [1]\n\txs.map((x, i) => x)\n}`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /only an element parameter/.test(err.message),
+		)
 	})
 
 	test("rejects mutating a variable outside of a function", () => {

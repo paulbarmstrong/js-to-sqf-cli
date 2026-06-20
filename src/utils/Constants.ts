@@ -8,6 +8,17 @@ export const SRC_DIR = "src"
 /** Directory (under the project root) that generated function files are written to. */
 export const SQF_OUTPUT_DIR = "sqf"
 
+/** File name of a generated function, with the BI `fn_` discovery prefix. */
+export function functionFileName(functionGlobalName: string): string {
+	return `fn_${functionGlobalName}.sqf`
+}
+
+/** Mission-relative SQF path to a function's file (backslash-separated, as SQF uses),
+ * e.g. `sqf\fn_blowUp_a1b2c3d4.sqf`. Used when a function is passed as a value. */
+export function functionSqfPath(functionGlobalName: string): string {
+	return `${SQF_OUTPUT_DIR}\\${functionFileName(functionGlobalName)}`
+}
+
 /** The mission entry point: a default-exported `defineMission({...})`. */
 export const INDEX_FILE_NAMES = ["index.ts", "index.js"]
 
@@ -78,6 +89,24 @@ export const NAMESPACE_MAPPINGS: Map<string, NamespaceMapping> = new Map([
  * applied to the receiver: `x.toString()` -> `str x`. */
 export const METHOD_MAPPINGS: Map<string, string> = new Map([
 	["toString", "str"],
+])
+
+/** An array iteration method that maps to an SQF iteration command taking a code block.
+ * SQF exposes the current element as `_x` (and the index as `_forEachIndex`). */
+export interface IterationMapping {
+	/** SQF command: `forEach`, `apply` (map), or `select` (filter). */
+	command: string
+	/** `forEach` is `{code} forEach array`; `apply`/`select` are `array command {code}`. */
+	codeFirst: boolean
+	/** Whether a second (index) callback parameter is available (only `forEach`). */
+	allowIndex: boolean
+}
+
+/** Array methods that map to SQF iteration commands operating on `_x`. */
+export const ITERATION_METHOD_MAPPINGS: Map<string, IterationMapping> = new Map([
+	["forEach", { command: "forEach", codeFirst: true, allowIndex: true }],
+	["map", { command: "apply", codeFirst: false, allowIndex: false }],
+	["filter", { command: "select", codeFirst: false, allowIndex: false }],
 ])
 
 export const CONSUMER_TS_COMPILER_OPTIONS = {
