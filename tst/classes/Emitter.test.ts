@@ -101,6 +101,19 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(sqf.trim(), /^addAction \["Boom", "sqf\\fn_blowUp_[0-9a-f]{8}\.sqf"\];$/)
 	})
 
+	test("emits an inline arrow argument as an SQF code block", () => {
+		const sqf = emit(`import { addAction, hint } from "js-to-sqf"\naddAction("Hi", () => { hint("hello") })`)
+		assert.match(sqf, /addAction \["Hi", \{/)
+		assert.match(sqf, /^\thint "hello";$/m)
+		assert.match(sqf, /^\}\];$/m)
+	})
+
+	test("an inline code block binds its parameters from _this", () => {
+		const body = emitFn(`import { hint } from "js-to-sqf"\nfunction f() {\n\tconst cb = (target, caller) => { hint("x") }\n}`)
+		assert.match(body, /private _cb = \{/)
+		assert.match(body, /params \["_target", "_caller"\];/)
+	})
+
 	test("declares a local with `private` and `_`-prefixes later references", () => {
 		const body = emitFn(`import { systemChat } from "js-to-sqf"\nfunction f() {\n\tconst msg = "hi"\n\tsystemChat(msg)\n}`)
 		assert.match(body, /^private _msg = "hi";$/m)

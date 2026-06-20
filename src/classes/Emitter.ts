@@ -249,6 +249,10 @@ export class Emitter {
 			case ts.SyntaxKind.ArrayLiteralExpression:
 				return this.emitArrayLiteral(node as ts.ArrayLiteralExpression)
 
+			case ts.SyntaxKind.ArrowFunction:
+			case ts.SyntaxKind.FunctionExpression:
+				return this.emitInlineCodeBlock(node as ts.ArrowFunction | ts.FunctionExpression)
+
 			case ts.SyntaxKind.PrefixUnaryExpression:
 				return this.emitPrefixUnary(node as ts.PrefixUnaryExpression)
 
@@ -307,6 +311,12 @@ export class Emitter {
 	/** A JS array literal maps directly to an SQF array: `[a, b, c]` (empty -> `[]`). */
 	private emitArrayLiteral(node: ts.ArrayLiteralExpression): string {
 		return `[${node.elements.map((element) => this.emitExpression(element)).join(", ")}]`
+	}
+
+	/** An inline arrow/function passed as a value (e.g. an `addAction` script) becomes an
+	 * SQF code block `{ ... }`. Any parameters bind from `_this` via `params [...]`. */
+	private emitInlineCodeBlock(node: ts.ArrowFunction | ts.FunctionExpression): string {
+		return `{\n${this.indent(this.emitFunctionBody(node))}\n}`
 	}
 
 	/** SQF string literals are double-quoted; an embedded `"` is escaped by doubling it. */
