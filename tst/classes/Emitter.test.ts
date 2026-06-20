@@ -148,6 +148,21 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(body, /^private _xs = \[\[1, 2\], \[3, 4\]\];$/m)
 	})
 
+	test("reads an array element with `select`, parenthesized", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst v = xs[0] + 1\n}`)
+		assert.match(body, /^private _v = \(_xs select 0\) \+ 1;$/m)
+	})
+
+	test("writes an array element with `set`", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\txs[0] = 9\n}`)
+		assert.match(body, /^_xs set \[0, 9\];$/m)
+	})
+
+	test("expands a compound element assignment via `set`", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\txs[0] += 5\n}`)
+		assert.match(body, /^_xs set \[0, \(_xs select 0\) \+ 5\];$/m)
+	})
+
 	test("emits if/then with a binary condition", () => {
 		const sqf = emit(
 			`import { systemChat } from "js-to-sqf"\nif (1 > 0) {\n\tsystemChat("x")\n}`,

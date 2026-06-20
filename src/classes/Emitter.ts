@@ -249,6 +249,9 @@ export class Emitter {
 			case ts.SyntaxKind.ArrayLiteralExpression:
 				return this.emitArrayLiteral(node as ts.ArrayLiteralExpression)
 
+			case ts.SyntaxKind.ElementAccessExpression:
+				return this.emitElementAccess(node as ts.ElementAccessExpression)
+
 			case ts.SyntaxKind.ArrowFunction:
 			case ts.SyntaxKind.FunctionExpression:
 				return this.emitInlineCodeBlock(node as ts.ArrowFunction | ts.FunctionExpression)
@@ -302,15 +305,36 @@ export class Emitter {
 			throw new UnsupportedSyntaxError(node, this.sourceFile,
 				"mutating variables outside of functions is not supported")
 		}
+		// Element writes use the SQF `set` command, not `=`.
+		if (ts.isElementAccessExpression(node.left)) {
+			return this.emitElementAssignment(node.left, node)
+		}
 		const compound = ASSIGNMENT_OPERATOR_MAPPINGS.get(node.operatorToken.kind)!
 		const left = this.emitExpression(node.left)
 		const right = this.emitExpression(node.right)
 		return compound === null ? `${left} = ${right}` : `${left} = ${left} ${compound} ${right}`
 	}
 
+	/** Array element write `arr[i] = x` -> `arr set [i, x]`. A compound assignment
+	 * (`arr[i] += x`) expands to `arr set [i, (arr select i) + x]`. */
+	private emitElementAssignment(target: ts.ElementAccessExpression, node: ts.BinaryExpression): string {
+		const array = this.emitExpression(target.expression)
+		const index = this.emitExpression(target.argumentExpression)
+		const compound = ASSIGNMENT_OPERATOR_MAPPINGS.get(node.operatorToken.kind)!
+		const right = this.emitExpression(node.right)
+		const value = compound === null ? right : `(${array} select ${index}) ${compound} ${right}`
+		return `${array} set [${index}, ${value}]`
+	}
+
 	/** A JS array literal maps directly to an SQF array: `[a, b, c]` (empty -> `[]`). */
 	private emitArrayLiteral(node: ts.ArrayLiteralExpression): string {
 		return `[${node.elements.map((element) => this.emitExpression(element)).join(", ")}]`
+	}
+
+	/** Array element read `arr[i]` -> `(arr select i)`. Parenthesized because the binary
+	 * `select` command binds looser than arithmetic, so it must stay a single operand. */
+	private emitElementAccess(node: ts.ElementAccessExpression): string {
+		return `(${this.emitExpression(node.expression)} select ${this.emitExpression(node.argumentExpression)})`
 	}
 
 	/** An inline arrow/function passed as a value (e.g. an `addAction` script) becomes an
