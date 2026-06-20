@@ -71,7 +71,8 @@ test("each init script loads constants and resolves consts to their globals", as
 	assert.match(initServer, /^systemChat \(str SPEED_[0-9a-f]{8}\);$/m)
 
 	const playerLocal = out.get("initPlayerLocal.sqf")!
-	assert.match(playerLocal, /^params \["_player", "_didJIP"\];$/m)
+	assert.match(playerLocal, /^private _player = _this select 0;$/m)
+	assert.match(playerLocal, /^private _didJIP = _this select 1;$/m)
 	assert.match(playerLocal, /^systemChat \(str TABLE_[0-9a-f]{8}\);$/m)
 
 	const init = out.get("init.sqf")!

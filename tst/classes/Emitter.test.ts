@@ -84,16 +84,16 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.equal(body, `["B_Heli_Light_01_F", false] call BIS_fnc_crewCount;`)
 	})
 
-	test("emits a function parameter as a `params` binding and `_`-prefixed reference", () => {
+	test("binds a function parameter positionally from _this", () => {
 		const body = emitFn(
 			`import { systemChat } from "js-to-sqf"\nfunction greet(name) {\n\tsystemChat(name)\n}`,
 		)
-		assert.equal(body, `params ["_name"];\nsystemChat _name;`)
+		assert.equal(body, `private _name = _this select 0;\nsystemChat _name;`)
 	})
 
-	test("emits a single-arg user function call as `arg call JS_fnc_<name>`", () => {
+	test("emits a single-arg user function call with an args array", () => {
 		const sqf = emit(`function greet(name) {}\ngreet("bob")`)
-		assert.match(sqf.trim(), /^"bob" call JS_fnc_greet_[0-9a-f]{8};$/)
+		assert.match(sqf.trim(), /^\["bob"\] call JS_fnc_greet_[0-9a-f]{8};$/)
 	})
 
 	test("substitutes a user function passed as a value with its SQF file path", () => {
@@ -108,10 +108,11 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(sqf, /^\}\];$/m)
 	})
 
-	test("an inline code block binds its parameters from _this", () => {
+	test("an inline code block binds its parameters positionally from _this", () => {
 		const body = emitFn(`import { hint } from "js-to-sqf"\nfunction f() {\n\tconst cb = (target, caller) => { hint("x") }\n}`)
 		assert.match(body, /private _cb = \{/)
-		assert.match(body, /params \["_target", "_caller"\];/)
+		assert.match(body, /private _target = _this select 0;/)
+		assert.match(body, /private _caller = _this select 1;/)
 	})
 
 	test("declares a local with `private` and `_`-prefixes later references", () => {

@@ -78,10 +78,9 @@ export class Emitter {
 		this.locals = new Set(outerLocals)
 		this.inFunctionBody = true
 		paramNames.forEach((name) => this.locals.add(name))
-		const parts: string[] = []
-		if (paramNames.length > 0) {
-			parts.push(`params [${paramNames.map((name) => `"_${name}"`).join(", ")}];`)
-		}
+		// Bind parameters positionally from `_this` (`_this select i`) rather than via
+		// `params [...]`, so binding is purely by order and independent of names.
+		const parts: string[] = paramNames.map((name, index) => `private _${name} = _this select ${index};`)
 		// Arrow functions may have a concise (expression) body; everything else a block.
 		const body = ts.isBlock(node.body)
 			? this.emitBlock(node.body)
@@ -430,7 +429,9 @@ export class Emitter {
 		const fn = this.importedFunctions.get(name)
 			?? this.project.functions.get(constKey(this.sourceFile.fileName, name))
 		if (fn !== undefined) {
-			return this.emitFunctionCall(`JS_fnc_${fn.globalName}`, args)
+			// User functions read params positionally from `_this`, so always pass an
+			// array (even a single arg) to keep `_this select i` valid.
+			return this.emitFunctionCall(`JS_fnc_${fn.globalName}`, args, true)
 		}
 		throw new UnsupportedSyntaxError(
 			node.expression, this.sourceFile,
@@ -536,10 +537,13 @@ export class Emitter {
 		return `${command} [${args.join(", ")}]`
 	}
 
-	/** BIS function form, invoked via `call`: `call FN`, `arg call FN`, or `[a, b] call FN`. */
-	private emitFunctionCall(command: string, args: string[]): string {
+	/** `call`-operator form: `call FN`, `arg call FN`, or `[a, b] call FN`. With
+	 * `alwaysArray`, a single argument is still wrapped (`[arg] call FN`) so the callee
+	 * can read `_this select 0` — used for user functions; BIS functions keep the
+	 * scalar single-arg form. */
+	private emitFunctionCall(command: string, args: string[], alwaysArray = false): string {
 		if (args.length === 0) return `call ${command}`
-		if (args.length === 1) return `${args[0]} call ${command}`
+		if (args.length === 1 && !alwaysArray) return `${args[0]} call ${command}`
 		return `[${args.join(", ")}] call ${command}`
 	}
 
