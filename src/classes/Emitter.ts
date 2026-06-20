@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, functionSqfPath, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
@@ -380,10 +380,10 @@ export class Emitter {
 		// SQF locals must be `_`-prefixed.
 		if (this.locals.has(name)) return `_${name}`
 		// A user function referenced as a value (e.g. passed to `addAction`) resolves to
-		// the path of its SQF file, which commands accept as a script parameter.
+		// its CfgFunctions handle `JS_fnc_<globalName>`.
 		const fn = this.importedFunctions.get(name)
 			?? this.project.functions.get(constKey(this.sourceFile.fileName, name))
-		if (fn !== undefined) return this.emitString(functionSqfPath(fn.globalName))
+		if (fn !== undefined) return `JS_fnc_${fn.globalName}`
 		// A module-level const — imported here, or declared in this file — resolves to
 		// its global SQF variable name (defined in sqf/constants.sqf).
 		const imported = this.importedConsts.get(name)

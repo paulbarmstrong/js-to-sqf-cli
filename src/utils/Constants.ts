@@ -13,12 +13,6 @@ export function functionFileName(functionGlobalName: string): string {
 	return `fn_${functionGlobalName}.sqf`
 }
 
-/** Mission-relative SQF path to a function's file (backslash-separated, as SQF uses),
- * e.g. `sqf\fn_blowUp_a1b2c3d4.sqf`. Used when a function is passed as a value. */
-export function functionSqfPath(functionGlobalName: string): string {
-	return `${SQF_OUTPUT_DIR}\\${functionFileName(functionGlobalName)}`
-}
-
 /** The mission entry point: a default-exported `defineMission({...})`. */
 export const INDEX_FILE_NAMES = ["index.ts", "index.js"]
 

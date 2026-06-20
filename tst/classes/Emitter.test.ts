@@ -96,9 +96,9 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(sqf.trim(), /^\["bob"\] call JS_fnc_greet_[0-9a-f]{8};$/)
 	})
 
-	test("substitutes a user function passed as a value with its SQF file path", () => {
+	test("substitutes a user function passed as a value with its JS_fnc_ handle", () => {
 		const sqf = emit(`import { addAction } from "js-to-sqf"\nfunction blowUp() {}\naddAction("Boom", blowUp)`)
-		assert.match(sqf.trim(), /^addAction \["Boom", "sqf\\fn_blowUp_[0-9a-f]{8}\.sqf"\];$/)
+		assert.match(sqf.trim(), /^addAction \["Boom", JS_fnc_blowUp_[0-9a-f]{8}\];$/)
 	})
 
 	test("emits an inline arrow argument as an SQF code block", () => {
