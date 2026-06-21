@@ -88,22 +88,15 @@ export const METHOD_MAPPINGS: Map<string, string> = new Map([
 	["toString", "str"],
 ])
 
-/** An array iteration method that maps to an SQF iteration command taking a code block.
- * SQF exposes the current element as `_x` (and the index as `_forEachIndex`). */
-export interface IterationMapping {
-	/** SQF command: `forEach`, `apply` (map), or `select` (filter). */
-	command: string
-	/** `forEach` is `{code} forEach array`; `apply`/`select` are `array command {code}`. */
-	codeFirst: boolean
-	/** Whether a second (index) callback parameter is available (only `forEach`). */
-	allowIndex: boolean
-}
+/** An array iteration method. All compile through SQF `forEach` (the only iteration
+ * command exposing both `_x` and `_forEachIndex`); `map`/`filter` collect into a new
+ * array via `pushBack`, so the element and index are always available. */
+export type IterationKind = "forEach" | "map" | "filter"
 
-/** Array methods that map to SQF iteration commands operating on `_x`. */
-export const ITERATION_METHOD_MAPPINGS: Map<string, IterationMapping> = new Map([
-	["forEach", { command: "forEach", codeFirst: true, allowIndex: true }],
-	["map", { command: "apply", codeFirst: false, allowIndex: false }],
-	["filter", { command: "select", codeFirst: false, allowIndex: false }],
+export const ITERATION_METHODS: Map<string, IterationKind> = new Map([
+	["forEach", "forEach"],
+	["map", "map"],
+	["filter", "filter"],
 ])
 
 export const CONSUMER_TS_COMPILER_OPTIONS = {

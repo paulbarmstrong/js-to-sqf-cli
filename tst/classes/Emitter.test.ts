@@ -177,6 +177,16 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(body, /^systemChat _msg;$/m)
 	})
 
+	test("emits a no-substitution template literal as a plain string", () => {
+		const sqf = emit('import { systemChat } from "js-to-sqf"\nsystemChat(`hi there`)')
+		assert.equal(sqf.trim(), `systemChat "hi there";`)
+	})
+
+	test("emits a template literal with substitutions as `format`", () => {
+		const body = emitFn('function f(name) {\n\treturn `hi ${name}!`\n}')
+		assert.match(body, /^format \["hi %1!", _name\];$/m)
+	})
+
 	test("maps .toString() to the SQF `str` command", () => {
 		const body = emitFn(`import { systemChat } from "js-to-sqf"\nfunction f() {\n\tconst n = 1\n\tsystemChat(n.toString())\n}`)
 		assert.match(body, /systemChat \(str _n\);/)
@@ -249,31 +259,25 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.match(body, /\} forEach _xs;/)
 	})
 
-	test("maps .map to apply (element param named x needs no binding)", () => {
+	test("maps .map to a forEach + pushBack collecting block", () => {
 		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.map((x) => x * 2)\n}`)
-		assert.match(body, /private _ys = _xs apply \{/)
-		assert.match(body, /^\t_x \* 2;$/m)
-		assert.doesNotMatch(body, /private _x = _x;/)
+		assert.match(body, /private _ys = call \{/)
+		assert.match(body, /private __result = \[\];/)
+		assert.match(body, /__result pushBack \(\[_x, _forEachIndex\] call \{/)
+		assert.match(body, /\} forEach _xs;/)
 	})
 
-	test("maps .filter to select", () => {
+	test("maps .map with an index parameter (bound from _forEachIndex)", () => {
+		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.map((x, i) => i)\n}`)
+		assert.match(body, /private _i = _this select 1;/)
+		assert.match(body, /__result pushBack/)
+	})
+
+	test("maps .filter to a forEach + conditional pushBack block", () => {
 		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.filter((v) => v > 0)\n}`)
-		assert.match(body, /private _ys = _xs select \{/)
-		assert.match(body, /private _v = _x;/)
-		assert.match(body, /_v > 0;/)
-	})
-
-	test("chains .map().filter() with a parenthesized receiver", () => {
-		const body = emitFn(`function f() {\n\tconst xs = [1]\n\tconst ys = xs.map((x) => x * 2).filter((x) => x > 0)\n}`)
-		assert.match(body, /private _ys = \(_xs apply \{[\s\S]*?\}\) select \{/)
-	})
-
-	test("rejects an index parameter on .map/.filter (no index available)", () => {
-		assert.throws(
-			() => emitFn(`function f() {\n\tconst xs = [1]\n\txs.map((x, i) => x)\n}`),
-			(err: unknown) =>
-				err instanceof UnsupportedSyntaxError && /only an element parameter/.test(err.message),
-		)
+		assert.match(body, /private _ys = call \{/)
+		assert.match(body, /if \(\[_x, _forEachIndex\] call \{/)
+		assert.match(body, /\}\) then \{ __result pushBack _x \};/)
 	})
 
 	test("rejects mutating a variable outside of a function", () => {

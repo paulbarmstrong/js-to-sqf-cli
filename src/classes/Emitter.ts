@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, GET_GAME_OBJECT_BY_VARIABLE_NAME, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, GET_GAME_OBJECT_BY_VARIABLE_NAME, ITERATION_METHODS, IterationKind, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
@@ -270,6 +270,13 @@ export class Emitter {
 			case ts.SyntaxKind.StringLiteral:
 				return this.emitString((node as ts.StringLiteral).text)
 
+			case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+				// A template with no `${}` is just a string.
+				return this.emitString((node as ts.NoSubstitutionTemplateLiteral).text)
+
+			case ts.SyntaxKind.TemplateExpression:
+				return this.emitTemplateExpression(node as ts.TemplateExpression)
+
 			case ts.SyntaxKind.NumericLiteral:
 				return (node as ts.NumericLiteral).text
 
@@ -350,6 +357,19 @@ export class Emitter {
 		return `"${value.replace(/"/g, '""')}"`
 	}
 
+	/** A template literal with `${}` substitutions maps to SQF `format`: literal chunks
+	 * become the format string with `%1`, `%2`, ... inserted, and the substitutions
+	 * become the trailing arguments. */
+	private emitTemplateExpression(node: ts.TemplateExpression): string {
+		const escape = (text: string) => text.replace(/"/g, '""')
+		let format = escape(node.head.text)
+		const args = node.templateSpans.map((span, index) => {
+			format += `%${index + 1}${escape(span.literal.text)}`
+			return this.emitExpression(span.expression)
+		})
+		return `format ["${format}", ${args.join(", ")}]`
+	}
+
 	private emitPrefixUnary(node: ts.PrefixUnaryExpression): string {
 		if (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) {
 			return this.emitIncrementDecrement(node.operand, node.operator === ts.SyntaxKind.PlusPlusToken)
@@ -425,7 +445,7 @@ export class Emitter {
 					? this.emitFunctionCall(command, args)
 					: this.emitCommandCall(command, args)
 			}
-			const iteration = ITERATION_METHOD_MAPPINGS.get(callee.name.text)
+			const iteration = ITERATION_METHODS.get(callee.name.text)
 			if (iteration !== undefined) {
 				return this.emitIteration(callee, iteration, node.arguments)
 			}
@@ -482,12 +502,13 @@ export class Emitter {
 		return `(${command} ${this.emitExpression(callee.expression)})`
 	}
 
-	/** Array iteration (`forEach`/`map`/`filter`) -> the SQF command that runs a code
-	 * block over each element (`forEach`/`apply`/`select`). The callback's element/index
-	 * params are bound to SQF's `_x`/`_forEachIndex`. */
+	/** Array iteration. All compile through SQF `forEach` (the only iteration command
+	 * exposing both `_x` and `_forEachIndex`): `forEach` runs the body per element;
+	 * `map`/`filter` collect into a new array via `pushBack` in an invoked block, so the
+	 * element and index are always available to the callback. */
 	private emitIteration(
 		callee: ts.PropertyAccessExpression,
-		mapping: IterationMapping,
+		kind: IterationKind,
 		args: ts.NodeArray<ts.Expression>,
 	): string {
 		const method = callee.name.text
@@ -500,33 +521,35 @@ export class Emitter {
 			throw new UnsupportedSyntaxError(callback, this.sourceFile,
 				`"${method}" requires an inline function callback`)
 		}
-		const code = `{\n${this.indent(this.emitIterationBlock(callback, mapping.allowIndex, method))}\n}`
+		if (callback.parameters.length > 2) {
+			throw new UnsupportedSyntaxError(callback, this.sourceFile,
+				`"${method}" callback supports at most (element, index) parameters`)
+		}
 		const receiver = this.emitIterationReceiver(callee.expression)
-		return mapping.codeFirst
-			? `${code} ${mapping.command} ${receiver}`
-			: `${receiver} ${mapping.command} ${code}`
-	}
 
-	/** Emit an iteration callback's body, binding its element/index params to SQF's
-	 * `_x` and `_forEachIndex`. */
-	private emitIterationBlock(
-		callback: ts.ArrowFunction | ts.FunctionExpression,
-		allowIndex: boolean,
-		method: string,
-	): string {
-		const params = callback.parameters
-		const maxParams = allowIndex ? 2 : 1
-		if (params.length > maxParams) {
-			throw new UnsupportedSyntaxError(callback, this.sourceFile, allowIndex
-				? `"${method}" callback supports at most (element, index) parameters`
-				: `"${method}" callback supports only an element parameter (no index is available)`)
+		if (kind === "forEach") {
+			return `{\n${this.indent(this.emitForEachBody(callback))}\n} forEach ${receiver}`
 		}
 
+		// map/filter: invoke the callback per element with `[element, index]` as `_this`
+		// (so it can use both), collecting results into a fresh array.
+		const invoke = `[_x, _forEachIndex] call {\n${this.indent(this.emitFunctionBody(callback))}\n}`
+		const collect = kind === "map"
+			? `__result pushBack (${invoke});`
+			: `if (${invoke}) then { __result pushBack _x };`
+		const body = `private __result = [];\n{\n${this.indent(collect)}\n} forEach ${receiver};\n__result`
+		return `call {\n${this.indent(body)}\n}`
+	}
+
+	/** Emit a `forEach` callback's body inline, binding its element param to `_x` and its
+	 * index param to `_forEachIndex` (a param literally named `x` needs no binding). */
+	private emitForEachBody(callback: ts.ArrowFunction | ts.FunctionExpression): string {
 		const outerLocals = this.locals
 		const outerInFunctionBody = this.inFunctionBody
 		this.locals = new Set(outerLocals)
 		this.inFunctionBody = true
 
+		const params = callback.parameters
 		const bindings: string[] = []
 		const bind = (param: ts.ParameterDeclaration, sqfVar: string) => {
 			if (!ts.isIdentifier(param.name)) {
@@ -535,7 +558,6 @@ export class Emitter {
 			}
 			const name = param.name.text
 			this.locals.add(name)
-			// The element magic var is already `_x`, so a param literally named `x` needs no binding.
 			if (`_${name}` !== sqfVar) bindings.push(`private _${name} = ${sqfVar};`)
 		}
 		if (params.length >= 1) bind(params[0]!, "_x")
