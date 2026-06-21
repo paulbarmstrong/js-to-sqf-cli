@@ -2,6 +2,10 @@ import ts from "typescript"
 
 export const TYPES_PACKAGE_NAME = "js-to-sqf"
 
+/** Intrinsic whose call looks up an object by its mission-editor variable name:
+ * `getGameObjectByVariableName(x)` -> `(missionNamespace getVariable x)`. */
+export const GET_GAME_OBJECT_BY_VARIABLE_NAME = "getGameObjectByVariableName"
+
 /** Source files are resolved relative to this directory within the project. */
 export const SRC_DIR = "src"
 

@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, GET_GAME_OBJECT_BY_VARIABLE_NAME, ITERATION_METHOD_MAPPINGS, IterationMapping, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
@@ -439,6 +439,7 @@ export class Emitter {
 		}
 		const name = node.expression.text
 		const command = this.importAliases.get(name)
+		if (command === GET_GAME_OBJECT_BY_VARIABLE_NAME) return this.emitGameObjectReference(node, args)
 		if (command !== undefined) return this.emitCommandCall(command, args)
 		// A user function (imported under any name, or declared in this same file) is
 		// invoked via its CfgFunctions handle `JS_fnc_<globalName>`.
@@ -453,6 +454,16 @@ export class Emitter {
 			node.expression, this.sourceFile,
 			`call to "${name}" has no SQF mapping`,
 		)
+	}
+
+	/** `getGameObjectByVariableName(x)` -> `(missionNamespace getVariable x)`. Parenthesized
+	 * because `getVariable` is a binary command and must stay a single operand. */
+	private emitGameObjectReference(node: ts.CallExpression, args: string[]): string {
+		if (args.length !== 1) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile,
+				`${GET_GAME_OBJECT_BY_VARIABLE_NAME} requires a single argument`)
+		}
+		return `(missionNamespace getVariable ${args[0]})`
 	}
 
 	/** A zero-arg value method, e.g. `x.toString()` -> `(str x)`. */

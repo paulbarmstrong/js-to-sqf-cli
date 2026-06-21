@@ -98,6 +98,16 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.equal(sqf.trim(), `addCamShake [1, 2, 3];`)
 	})
 
+	test("converts getGameObjectByVariableName to missionNamespace getVariable", () => {
+		const sqf = emit(`import { getGameObjectByVariableName } from "js-to-sqf"\ngetGameObjectByVariableName("myCar")`)
+		assert.equal(sqf.trim(), `(missionNamespace getVariable "myCar");`)
+	})
+
+	test("getGameObjectByVariableName accepts a non-literal argument", () => {
+		const body = emitFn(`import { getGameObjectByVariableName } from "js-to-sqf"\nfunction f(n) { getGameObjectByVariableName(n) }`)
+		assert.match(body, /\(missionNamespace getVariable _n\);/)
+	})
+
 	test("emits a namespace member referenced as a value as its SQF identifier", () => {
 		const body = emitFn(`import { bis } from "js-to-sqf"\nfunction f() {\n\tconst x = bis.getParamValue\n}`)
 		assert.match(body, /^private _x = BIS_fnc_getParamValue;$/m)
