@@ -142,8 +142,9 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
 	// All module-level consts -> a single sqf/constants.sqf (defined once, order-free).
 	const hasConstants = project.consts.size > 0
 	if (hasConstants) {
+		// Emit in declaration order so a const that references an earlier const stays
+		// correctly ordered (valid source declares before use).
 		const defs = [...project.consts.values()]
-			.sort((a, b) => (a.globalName < b.globalName ? -1 : a.globalName > b.globalName ? 1 : 0))
 			.map((c) => new Emitter(program.getSourceFile(c.sourceFileName)!, project).emitConstDefinition(c))
 			.join("\n")
 		outputs.push({

@@ -113,29 +113,9 @@ function isModuleConstStatement(statement: ts.Statement): statement is ts.Variab
 		&& (statement.declarationList.flags & ts.NodeFlags.Const) !== 0
 }
 
-/** Outside-function consts must be immutable literal values: number, string, boolean,
- * or an array of such (nested arrays allowed). */
-function isLiteralInitializer(expr: ts.Expression): boolean {
-	switch (expr.kind) {
-		case ts.SyntaxKind.NumericLiteral:
-		case ts.SyntaxKind.StringLiteral:
-		case ts.SyntaxKind.TrueKeyword:
-		case ts.SyntaxKind.FalseKeyword:
-			return true
-		case ts.SyntaxKind.PrefixUnaryExpression: {
-			const unary = expr as ts.PrefixUnaryExpression
-			return (unary.operator === ts.SyntaxKind.MinusToken || unary.operator === ts.SyntaxKind.PlusToken)
-				&& unary.operand.kind === ts.SyntaxKind.NumericLiteral
-		}
-		case ts.SyntaxKind.ArrayLiteralExpression:
-			return (expr as ts.ArrayLiteralExpression).elements.every(isLiteralInitializer)
-		default:
-			return false
-	}
-}
-
 /** Discover all functions and all module-level consts, each assigned a unique
- * deterministic global name. Non-literal module consts are an error. */
+ * deterministic global name. Const initializers may be any supported expression
+ * (literal, command call, etc.); they are evaluated once when `constants.sqf` loads. */
 export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDir: string): ProjectModel {
 	const files = new Set(userFiles.map((sf) => sf.fileName))
 	const functions = new Map<string, FunctionDef>()
@@ -154,9 +134,9 @@ export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDi
 			} else if (isModuleConstStatement(statement)) {
 				for (const declaration of statement.declarationList.declarations) {
 					if (!ts.isIdentifier(declaration.name)) continue
-					if (declaration.initializer === undefined || !isLiteralInitializer(declaration.initializer)) {
+					if (declaration.initializer === undefined) {
 						throw new UnsupportedSyntaxError(declaration, sourceFile,
-							`const "${declaration.name.text}" outside a function must be an immutable literal value`)
+							`const "${declaration.name.text}" must have an initializer`)
 					}
 					const name = declaration.name.text
 					consts.set(constKey(sourceFile.fileName, name), {

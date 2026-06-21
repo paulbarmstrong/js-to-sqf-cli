@@ -20,7 +20,7 @@ Users may organize their javascript code in other files within the `src` directo
 * It's only suitable for "mission" projects
 * Mutating variables outside of functions are not supported
 * Imports from packages other than `js-to-sqf` are not supported
-* All variables outside of a function must be immutable literal values.
+* All variables outside of a function must be const, must not mutate, and may only depend on other variables declared earlier in the same file
 * Classes are not supported
 * Only these native javascript variable types are supported:
   * number

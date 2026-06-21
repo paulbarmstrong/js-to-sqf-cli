@@ -5,7 +5,6 @@ import { dirname, join } from "node:path"
 import { test } from "node:test"
 
 import { transpile as transpileMission, transpileProject } from "../../src/utils/Transpile"
-import { UnsupportedSyntaxError } from "../../src/classes/UnsupportedSyntaxError"
 
 /** Write a set of source files into a fresh temp project and transpile it,
  * returning the outputs keyed by project-relative path. */
@@ -167,17 +166,13 @@ test("allows same-named functions in different files (no collision)", async () =
 	assert.equal(calls.size, 2)
 })
 
-test("rejects a non-literal module-level const", async () => {
-	await assert.rejects(
-		transpile({
-			"src/index.ts":
-				`import { defineMission } from "js-to-sqf"\n` +
-				`function compute() { return 1 }\n` +
-				`const BAD = compute()\n` +
-				`export default defineMission({ init: () => {} })\n`,
-		}),
-		(err: unknown) =>
-			err instanceof UnsupportedSyntaxError &&
-			/const "BAD" outside a function must be an immutable literal/.test(err.message),
-	)
+test("allows a module-level const with a computed (non-literal) initializer", async () => {
+	const out = await transpile({
+		"src/index.ts":
+			`import { defineMission } from "js-to-sqf"\n` +
+			`function compute(): number { return 1 }\n` +
+			`const VALUE = compute()\n` +
+			`export default defineMission({ init: () => {} })\n`,
+	})
+	assert.match(out.get("sqf/constants.sqf")!, /^VALUE_[0-9a-f]{8} = call JS_fnc_compute_[0-9a-f]{8};$/m)
 })
