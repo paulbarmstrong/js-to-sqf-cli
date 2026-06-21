@@ -56,8 +56,8 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.equal(sqf.trim(), `"x" call BIS_fnc_crewCount;`)
 	})
 
-	test("emits a diag.* namespace call in command form", () => {
-		const sqf = emit(`import { diag } from "js-to-sqf"\ndiag.log("x")`)
+	test("emits a diag command as a plain command (no special namespace)", () => {
+		const sqf = emit(`import { diag_log } from "js-to-sqf"\ndiag_log("x")`)
 		assert.equal(sqf.trim(), `diag_log "x";`)
 	})
 
@@ -96,6 +96,11 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 			`/** @sqfsyntaxtype unary */\nexport function addCamShake(p, d, f) {}`,
 		)
 		assert.equal(sqf.trim(), `addCamShake [1, 2, 3];`)
+	})
+
+	test("emits a namespace member referenced as a value as its SQF identifier", () => {
+		const body = emitFn(`import { bis } from "js-to-sqf"\nfunction f() {\n\tconst x = bis.getParamValue\n}`)
+		assert.match(body, /^private _x = BIS_fnc_getParamValue;$/m)
 	})
 
 	test("rejects a member call that is neither a namespace nor a mapped method", () => {

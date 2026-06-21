@@ -239,6 +239,9 @@ export class Emitter {
 			case ts.SyntaxKind.CallExpression:
 				return this.emitCall(node as ts.CallExpression)
 
+			case ts.SyntaxKind.PropertyAccessExpression:
+				return this.emitPropertyAccess(node as ts.PropertyAccessExpression)
+
 			case ts.SyntaxKind.BinaryExpression:
 				return this.emitBinary(node as ts.BinaryExpression)
 
@@ -392,6 +395,19 @@ export class Emitter {
 		if (own !== undefined) return own.globalName
 		// Everything else (commands, etc.) is emitted verbatim.
 		return name
+	}
+
+	/** A namespace member referenced as a value, e.g. `bis.getParamValue` passed to a
+	 * command, resolves to its SQF identifier (`BIS_fnc_getParamValue`). */
+	private emitPropertyAccess(node: ts.PropertyAccessExpression): string {
+		const namespace = ts.isIdentifier(node.expression)
+			? this.importedNamespaces.get(node.expression.text)
+			: undefined
+		if (namespace !== undefined) {
+			return `${namespace.sqfPrefix}${node.name.text}`
+		}
+		throw new UnsupportedSyntaxError(node.name, this.sourceFile,
+			`property access "${node.name.text}" is not supported here`)
 	}
 
 	private emitCall(node: ts.CallExpression): string {

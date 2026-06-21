@@ -76,7 +76,6 @@ export interface NamespaceMapping {
  * original export name (the alias, if any, is resolved before lookup). */
 export const NAMESPACE_MAPPINGS: Map<string, NamespaceMapping> = new Map([
 	["bis", { sqfPrefix: "BIS_fnc_", form: "call" }],
-	["diag", { sqfPrefix: "diag_", form: "command" }],
 ])
 
 /** Zero-arg value methods (e.g. `x.toString()`) that map to a unary SQF command
