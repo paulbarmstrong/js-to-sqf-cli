@@ -530,8 +530,19 @@ export class Emitter {
 		return ts.isCallExpression(expr) || ts.isBinaryExpression(expr) ? `(${out})` : out
 	}
 
-	/** Unary SQF command form: `cmd arg`, or `cmd [a, b]` for multiple args, or bare `cmd` for none. */
+	/** Emit a command call in the shape declared by its `@sqfsyntaxtype`:
+	 * - nullary: `cmd`
+	 * - binary: `left cmd right` (right = the 2nd arg, or `[arg2, ...]` for 3+ args)
+	 * - unary (and the fallback when the type is unknown): `cmd arg`, `cmd [a, b]`, or `cmd`.
+	 */
 	private emitCommandCall(command: string, args: string[]): string {
+		const syntax = this.project.commandSyntax.get(command)
+		if (syntax === "nullary") return command
+		if (syntax === "binary" && args.length >= 2) {
+			const rest = args.slice(1)
+			const right = rest.length === 1 ? rest[0] : `[${rest.join(", ")}]`
+			return `${args[0]} ${command} ${right}`
+		}
 		if (args.length === 0) return command
 		if (args.length === 1) return `${command} ${args[0]}`
 		return `${command} [${args.join(", ")}]`

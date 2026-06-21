@@ -6,7 +6,7 @@ import ts from "typescript"
 
 import { Emitter } from "../../src/classes/Emitter"
 import { UnsupportedSyntaxError } from "../../src/classes/UnsupportedSyntaxError"
-import { buildProjectModel } from "../../src/classes/ProjectModel"
+import { buildCommandSyntax, buildProjectModel } from "../../src/classes/ProjectModel"
 
 /** Parse `code` in-memory and emit SQF — the unified traversal validates as it emits.
  * A project model is built from the single file so same-file functions/consts resolve. */
@@ -22,6 +22,15 @@ function emitFn(code: string, fileName = "test.js"): string {
 	const fn = sourceFile.statements.find(ts.isFunctionDeclaration)
 	assert.ok(fn, "expected a function declaration")
 	return new Emitter(sourceFile, buildProjectModel([sourceFile], ".")).emitFunctionBody(fn)
+}
+
+/** Emit `code` with command call shapes learned from `@sqfsyntaxtype` tags in `decls`. */
+function emitWithCommands(code: string, decls: string): string {
+	const declFile = ts.createSourceFile("commands.d.ts", decls, ts.ScriptTarget.Latest, true)
+	const sourceFile = ts.createSourceFile("test.js", code, ts.ScriptTarget.Latest, true)
+	const project = buildProjectModel([sourceFile], ".")
+	for (const [command, syntax] of buildCommandSyntax([declFile])) project.commandSyntax.set(command, syntax)
+	return new Emitter(sourceFile, project).emitFile()
 }
 
 describe("emitSourceFile (validate + emit in one pass)", () => {
@@ -55,6 +64,38 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 	test("resolves an aliased namespace import", () => {
 		const sqf = emit(`import { bis as b } from "js-to-sqf"\nb.crewCount("x")`)
 		assert.equal(sqf.trim(), `"x" call BIS_fnc_crewCount;`)
+	})
+
+	test("emits a nullary command (@sqfsyntaxtype nullary) bare", () => {
+		const sqf = emitWithCommands(
+			`import { player } from "js-to-sqf"\nplayer()`,
+			`/** @sqfsyntaxtype nullary */\nexport function player() {}`,
+		)
+		assert.equal(sqf.trim(), `player;`)
+	})
+
+	test("emits a binary command (@sqfsyntaxtype binary) as `left cmd right`", () => {
+		const sqf = emitWithCommands(
+			`import { spawn } from "js-to-sqf"\nspawn([1], 2)`,
+			`/** @sqfsyntaxtype binary */\nexport function spawn(a, b) {}`,
+		)
+		assert.equal(sqf.trim(), `[1] spawn 2;`)
+	})
+
+	test("emits a binary command with 3+ args as `left cmd [rest...]`", () => {
+		const sqf = emitWithCommands(
+			`import { addAction } from "js-to-sqf"\naddAction(1, "t", 3)`,
+			`/** @sqfsyntaxtype binary */\nexport function addAction(a, b, c) {}`,
+		)
+		assert.equal(sqf.trim(), `1 addAction ["t", 3];`)
+	})
+
+	test("emits a unary command with multiple args as an array operand", () => {
+		const sqf = emitWithCommands(
+			`import { addCamShake } from "js-to-sqf"\naddCamShake(1, 2, 3)`,
+			`/** @sqfsyntaxtype unary */\nexport function addCamShake(p, d, f) {}`,
+		)
+		assert.equal(sqf.trim(), `addCamShake [1, 2, 3];`)
 	})
 
 	test("rejects a member call that is neither a namespace nor a mapped method", () => {

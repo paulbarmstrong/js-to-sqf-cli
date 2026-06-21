@@ -34,6 +34,12 @@ export interface MissionHandler {
 	node: ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration
 }
 
+/** SQF command call shape, declared on each `js-to-sqf` command via the
+ * `@sqfsyntaxtype` JSDoc tag. */
+export type SqfSyntaxType = "nullary" | "unary" | "binary"
+
+const SQF_SYNTAX_TYPE_TAG = /@sqfsyntaxtype\s+(nullary|unary|binary)\b/
+
 /** A project-wide registry, built once before emission, that gives each `Emitter`
  * the cross-file knowledge it needs to resolve identifiers. */
 export interface ProjectModel {
@@ -44,6 +50,8 @@ export interface ProjectModel {
 	consts: Map<string, ConstGlobal>
 	/** Absolute paths of every user source file, for relative-import resolution. */
 	files: Set<string>
+	/** SQF command name -> its call shape, from `@sqfsyntaxtype` tags on `js-to-sqf`. */
+	commandSyntax: Map<string, SqfSyntaxType>
 }
 
 /** A model with no cross-file knowledge. Used by unit tests that emit a single
@@ -52,6 +60,29 @@ export const EMPTY_PROJECT_MODEL: ProjectModel = {
 	functions: new Map(),
 	consts: new Map(),
 	files: new Set(),
+	commandSyntax: new Map(),
+}
+
+/** Read the `@sqfsyntaxtype` JSDoc tag off every command declaration (e.g. in the
+ * `js-to-sqf` types) to learn whether each command is nullary/unary/binary. The tag
+ * is read from the raw leading comment text, which is reliable regardless of whether
+ * the parser structured the JSDoc tags. */
+export function buildCommandSyntax(sourceFiles: readonly ts.SourceFile[]): Map<string, SqfSyntaxType> {
+	const commandSyntax = new Map<string, SqfSyntaxType>()
+	for (const sourceFile of sourceFiles) {
+		for (const statement of sourceFile.statements) {
+			if (!ts.isFunctionDeclaration(statement) || statement.name === undefined) continue
+			const ranges = ts.getLeadingCommentRanges(sourceFile.text, statement.getFullStart()) ?? []
+			for (const range of ranges) {
+				const match = SQF_SYNTAX_TYPE_TAG.exec(sourceFile.text.slice(range.pos, range.end))
+				if (match !== null) {
+					commandSyntax.set(statement.name.text, match[1] as SqfSyntaxType)
+					break
+				}
+			}
+		}
+	}
+	return commandSyntax
 }
 
 /** Key used for `ProjectModel.consts`. */
@@ -139,7 +170,7 @@ export function buildProjectModel(userFiles: readonly ts.SourceFile[], projectDi
 		}
 	}
 
-	return { functions, consts, files }
+	return { functions, consts, files, commandSyntax: new Map() }
 }
 
 /** Read the `init`/`initServer`/`initPlayerLocal` handlers from a default-exported

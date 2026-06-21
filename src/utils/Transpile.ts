@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import ts from "typescript"
 import { Emitter } from "../classes/Emitter.js"
 import { UnsupportedSyntaxError } from "../classes/UnsupportedSyntaxError.js"
-import { buildProjectModel, extractMissionHandlers, FunctionDef, ProjectModel } from "../classes/ProjectModel.js"
+import { buildCommandSyntax, buildProjectModel, extractMissionHandlers, FunctionDef, ProjectModel } from "../classes/ProjectModel.js"
 
 export async function transpile(projectDir: string) {
 	console.log(`Transpiling ${projectDir}...`)
@@ -130,6 +130,10 @@ export function transpileProject(indexFile: string, projectDir: string): Transpi
 		.filter(sf => !program.isSourceFileFromExternalLibrary(sf) && !program.isSourceFileDefaultLibrary(sf))
 
 	const project = buildProjectModel(userFiles, projectDir)
+	// Command call shapes come from `@sqfsyntaxtype` tags on the js-to-sqf declarations.
+	for (const [command, syntax] of buildCommandSyntax(program.getSourceFiles())) {
+		project.commandSyntax.set(command, syntax)
+	}
 	const indexSourceFile = program.getSourceFile(resolve(indexFile))!
 	const handlers = extractMissionHandlers(indexSourceFile)
 
