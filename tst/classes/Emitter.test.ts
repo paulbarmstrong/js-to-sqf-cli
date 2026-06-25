@@ -98,6 +98,22 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 		assert.equal(sqf.trim(), `addCamShake [1, 2, 3];`)
 	})
 
+	test("transforms new Config(...) into an SQF config path with `>>`", () => {
+		const body = emitFn(
+			`import { Config, configFile, typeOf } from "js-to-sqf"\n` +
+			`function f(turret) {\n\tconst c = new Config(configFile(), "CfgVehicles", typeOf(turret), "displayName")\n}`,
+		)
+		assert.match(body, /private _c = \(configFile >> "CfgVehicles" >> typeOf _turret >> "displayName"\);/)
+	})
+
+	test("rejects `new` on anything other than Config", () => {
+		assert.throws(
+			() => emitFn(`function f() {\n\tconst d = new Date()\n}`),
+			(err: unknown) =>
+				err instanceof UnsupportedSyntaxError && /only `new Config\(\.\.\.\)` is supported/.test(err.message),
+		)
+	})
+
 	test("converts getGameObjectByVariableName to missionNamespace getVariable", () => {
 		const sqf = emit(`import { getGameObjectByVariableName } from "js-to-sqf"\ngetGameObjectByVariableName("myCar")`)
 		assert.equal(sqf.trim(), `(missionNamespace getVariable "myCar");`)
@@ -228,6 +244,21 @@ describe("emitSourceFile (validate + emit in one pass)", () => {
 	test("expands a compound element assignment via `set`", () => {
 		const body = emitFn(`function f() {\n\tconst xs = [1]\n\txs[0] += 5\n}`)
 		assert.match(body, /^_xs set \[0, \(_xs select 0\) \+ 5\];$/m)
+	})
+
+	test("emits an object literal as a HashMap (nested too)", () => {
+		const body = emitFn(`function f() {\n\tconst o = { name: "x", meta: { map: "S" } }\n}`)
+		assert.match(body, /private _o = createHashMapFromArray \[\["name", "x"\], \["meta", createHashMapFromArray \[\["map", "S"\]\]\]\];/)
+	})
+
+	test("reads an object property (and nested) with HashMap `get`", () => {
+		const body = emitFn(`import { systemChat } from "js-to-sqf"\nfunction f() {\n\tconst o = { meta: { map: "S" } }\n\tsystemChat(o.meta.map)\n}`)
+		assert.match(body, /systemChat \(\(_o get "meta"\) get "map"\);/)
+	})
+
+	test("writes an object property with HashMap `set`", () => {
+		const body = emitFn(`function f() {\n\tconst o = { size: 1 }\n\to.size = 100\n}`)
+		assert.match(body, /^_o set \["size", 100\];$/m)
 	})
 
 	test("emits if/then with a binary condition", () => {

@@ -1,5 +1,5 @@
 import ts from "typescript"
-import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, GET_GAME_OBJECT_BY_VARIABLE_NAME, ITERATION_METHODS, IterationKind, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
+import { ASSIGNMENT_OPERATOR_MAPPINGS, BINARY_OPERATOR_MAPPINGS, CONFIG_CLASS_NAME, GET_GAME_OBJECT_BY_VARIABLE_NAME, ITERATION_METHODS, IterationKind, METHOD_MAPPINGS, NAMESPACE_MAPPINGS, NamespaceMapping, PREFIX_OPERATOR_MAPPINGS, TYPES_PACKAGE_NAME } from "../utils/Constants.js"
 import { constKey, ConstGlobal, EMPTY_PROJECT_MODEL, FunctionDef, ProjectModel, resolveRelativeImport } from "./ProjectModel.js"
 import { UnsupportedSyntaxError } from "./UnsupportedSyntaxError.js"
 
@@ -242,6 +242,9 @@ export class Emitter {
 			case ts.SyntaxKind.PropertyAccessExpression:
 				return this.emitPropertyAccess(node as ts.PropertyAccessExpression)
 
+			case ts.SyntaxKind.NewExpression:
+				return this.emitNew(node as ts.NewExpression)
+
 			case ts.SyntaxKind.BinaryExpression:
 				return this.emitBinary(node as ts.BinaryExpression)
 
@@ -250,6 +253,9 @@ export class Emitter {
 
 			case ts.SyntaxKind.ArrayLiteralExpression:
 				return this.emitArrayLiteral(node as ts.ArrayLiteralExpression)
+
+			case ts.SyntaxKind.ObjectLiteralExpression:
+				return this.emitObjectLiteral(node as ts.ObjectLiteralExpression)
 
 			case ts.SyntaxKind.ElementAccessExpression:
 				return this.emitElementAccess(node as ts.ElementAccessExpression)
@@ -314,9 +320,12 @@ export class Emitter {
 			throw new UnsupportedSyntaxError(node, this.sourceFile,
 				"mutating variables outside of functions is not supported")
 		}
-		// Element writes use the SQF `set` command, not `=`.
+		// Element/property writes use the SQF `set` command, not `=`.
 		if (ts.isElementAccessExpression(node.left)) {
 			return this.emitElementAssignment(node.left, node)
+		}
+		if (ts.isPropertyAccessExpression(node.left)) {
+			return this.emitPropertyAssignment(node.left, node)
 		}
 		const compound = ASSIGNMENT_OPERATOR_MAPPINGS.get(node.operatorToken.kind)!
 		const left = this.emitExpression(node.left)
@@ -335,9 +344,44 @@ export class Emitter {
 		return `${array} set [${index}, ${value}]`
 	}
 
+	/** Object property write `obj.k = x` -> `obj set ["k", x]` (SQF HashMap). A compound
+	 * assignment (`obj.k += x`) expands to `obj set ["k", (obj get "k") + x]`. */
+	private emitPropertyAssignment(target: ts.PropertyAccessExpression, node: ts.BinaryExpression): string {
+		const object = this.emitExpression(target.expression)
+		const key = this.emitString(target.name.text)
+		const compound = ASSIGNMENT_OPERATOR_MAPPINGS.get(node.operatorToken.kind)!
+		const right = this.emitExpression(node.right)
+		const value = compound === null ? right : `(${object} get ${key}) ${compound} ${right}`
+		return `${object} set [${key}, ${value}]`
+	}
+
 	/** A JS array literal maps directly to an SQF array: `[a, b, c]` (empty -> `[]`). */
 	private emitArrayLiteral(node: ts.ArrayLiteralExpression): string {
 		return `[${node.elements.map((element) => this.emitExpression(element)).join(", ")}]`
+	}
+
+	/** A JS object literal maps to an SQF HashMap built with `createHashMapFromArray`:
+	 * `{ a: 1, b: "x" }` -> `createHashMapFromArray [["a", 1], ["b", "x"]]`. Keys must be
+	 * string identifiers; values may be any supported expression (incl. nested objects). */
+	private emitObjectLiteral(node: ts.ObjectLiteralExpression): string {
+		const pairs = node.properties.map((property) => {
+			if (ts.isPropertyAssignment(property)) {
+				return `[${this.emitObjectKey(property.name)}, ${this.emitExpression(property.initializer)}]`
+			}
+			if (ts.isShorthandPropertyAssignment(property)) {
+				return `[${this.emitString(property.name.text)}, ${this.emitIdentifier(property.name)}]`
+			}
+			throw new UnsupportedSyntaxError(property, this.sourceFile,
+				"only `key: value` object properties are supported")
+		})
+		return `createHashMapFromArray [${pairs.join(", ")}]`
+	}
+
+	/** An object key must be a plain string identifier (`name:`) or string literal
+	 * (`"name":`); computed/numeric keys are unsupported. */
+	private emitObjectKey(name: ts.PropertyName): string {
+		if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return this.emitString(name.text)
+		throw new UnsupportedSyntaxError(name, this.sourceFile, "object keys must be string identifiers")
 	}
 
 	/** Array element read `arr[i]` -> `(arr select i)`. Parenthesized because the binary
@@ -417,8 +461,9 @@ export class Emitter {
 		return name
 	}
 
-	/** A namespace member referenced as a value, e.g. `bis.getParamValue` passed to a
-	 * command, resolves to its SQF identifier (`BIS_fnc_getParamValue`). */
+	/** Property access. A namespace member (`bis.getParamValue`) resolves to its SQF
+	 * identifier; any other property read is an object (HashMap) lookup `obj get "key"`,
+	 * parenthesized since `get` is a binary command. */
 	private emitPropertyAccess(node: ts.PropertyAccessExpression): string {
 		const namespace = ts.isIdentifier(node.expression)
 			? this.importedNamespaces.get(node.expression.text)
@@ -426,8 +471,22 @@ export class Emitter {
 		if (namespace !== undefined) {
 			return `${namespace.sqfPrefix}${node.name.text}`
 		}
-		throw new UnsupportedSyntaxError(node.name, this.sourceFile,
-			`property access "${node.name.text}" is not supported here`)
+		return `(${this.emitExpression(node.expression)} get ${this.emitString(node.name.text)})`
+	}
+
+	/** `new Config(root, "A", x, ...)` -> `(root >> "A" >> x >> ...)`, the SQF config-path
+	 * navigation. Parenthesized so the `>>` chain stays a single operand. */
+	private emitNew(node: ts.NewExpression): string {
+		if (!ts.isIdentifier(node.expression) || this.importAliases.get(node.expression.text) !== CONFIG_CLASS_NAME) {
+			throw new UnsupportedSyntaxError(node.expression, this.sourceFile,
+				`only \`new ${CONFIG_CLASS_NAME}(...)\` is supported`)
+		}
+		const args = (node.arguments ?? []).map((arg) => this.emitExpression(arg))
+		if (args.length === 0) {
+			throw new UnsupportedSyntaxError(node, this.sourceFile,
+				`${CONFIG_CLASS_NAME} requires at least one path segment`)
+		}
+		return `(${args.join(" >> ")})`
 	}
 
 	private emitCall(node: ts.CallExpression): string {

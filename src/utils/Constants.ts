@@ -6,6 +6,10 @@ export const TYPES_PACKAGE_NAME = "js-to-sqf"
  * `getGameObjectByVariableName(x)` -> `(missionNamespace getVariable x)`. */
 export const GET_GAME_OBJECT_BY_VARIABLE_NAME = "getGameObjectByVariableName"
 
+/** Intrinsic class whose construction builds an SQF config path with `>>`:
+ * `new Config(configFile(), "CfgVehicles", x)` -> `(configFile >> "CfgVehicles" >> x)`. */
+export const CONFIG_CLASS_NAME = "Config"
+
 /** Source files are resolved relative to this directory within the project. */
 export const SRC_DIR = "src"
 
